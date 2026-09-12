@@ -12,7 +12,9 @@ Progettato con due obiettivi: **controllo totale** e **risparmio di token**.
   `./start-http.sh` o `start-http.cmd` (remoto, HTTP).
 - **Due trasporti.** stdio in locale; via HTTP sia Streamable HTTP
   (MCP 2025-06-18) che il legacy HTTP+SSE (MCP 2024-11-05), senza autenticazione.
-- **25 tool in 10 gruppi**, accendibili a gruppi per non pagare token inutili.
+- **26 tool in 11 gruppi**, accendibili a gruppi per non pagare token inutili.
+- **Variabili lato server**: memorizzi un valore una volta e lo richiami con
+  `${vars.nome}`, senza ripassarlo nella conversazione.
 - **Skill incluso** che insegna al modello come usarlo spendendo pochi token.
 
 ---
@@ -186,7 +188,7 @@ Se un domani volessi restringere le capacità invece della rete, ci sono già
 
 ## I tool
 
-25 tool in 10 gruppi. Le definizioni dei tool stanno nel contesto del modello
+26 tool in 11 gruppi. Le definizioni dei tool stanno nel contesto del modello
 **a ogni richiesta**, quindi i gruppi si accendono e spengono: vedi
 [Profili](#profili-dei-tool).
 
@@ -203,6 +205,13 @@ Se un domani volessi restringere le capacità invece della rete, ci sono già
 | `file_edit` | Modifica *parti* di un file: più operazioni in una sola chiamata, atomiche. |
 | `fs_list` | Elenca una directory, con profondità e filtro glob. |
 | `shell_info` | Piattaforma, shell attiva e disponibili, config, guardrail, profilo attivo. |
+
+### vars — sempre attivo (1 tool)
+
+`vars` — variabili lato server riusabili tra chiamate: `set`, `get`,
+`list`, `delete`, `clear`, `append`, `incr`, `load`, `save`. Sempre
+attivo perché l'espansione `${vars.…}` lo è sempre. Vedi
+[Variabili interne](#variabili-interne).
 
 ### search (2 tool)
 
@@ -278,6 +287,118 @@ salvataggio che ne genera tre viene riportato una volta.
 
 ---
 
+## Variabili interne
+
+Un valore catturato può restare sul server. Lo memorizzi una volta, poi lo
+richiami come `${vars.<nome>}` nelle chiamate successive: il valore non
+ripassa mai dalla conversazione.
+
+```
+shell_exec { command: "git rev-parse --short HEAD", assign: "sha" }
+shell_exec { command: "docker build -t app:${vars.sha} ." }
+```
+
+La seconda chiamata non spende un token sullo sha. È esattamente il punto.
+
+### Il tool `vars`
+
+| Azione | Cosa fa |
+| --- | --- |
+| `set` | Memorizza un valore (qualsiasi tipo JSON). Una stringa viene essa stessa espansa, così puoi comporre da altre variabili. |
+| `get` | Legge un valore (o più, con `names`). |
+| `list` | Nomi, tipi, dimensioni e un'anteprima — **non** i valori interi. |
+| `delete` / `clear` | Rimuove una variabile o tutte (`clear` richiede `confirm:true`). |
+| `append` / `incr` | Accoda a una stringa o array; incrementa un numero. |
+| `load` / `save` | Carica un file in una variabile (`json:true` per parsarlo) o scrive una variabile su file. |
+
+`list` mostra volutamente anteprime e non valori: riversare lo store
+annullerebbe il risparmio. Usa `get` quando devi davvero leggere qualcosa.
+
+### Catturare senza mai vedere il valore
+
+Tre tool scrivono direttamente nello store:
+
+```
+shell_exec   { command: "...", assign: "nome" }    lo stdout ripulito
+http_request { url: "...", assign: "body" }        il corpo della risposta
+shell_bulk   steps: [{ ..., assign: "nome" }]      per singolo step
+```
+
+Un `assign` in `shell_bulk` è visibile agli step successivi dello stesso run
+**e** resta disponibile per le chiamate seguenti. E ogni step legge già tutto
+lo store, quindi non serve passargli valori che ci sono già.
+
+```json
+{"steps": [
+  {"id": "ver", "command": "node -p \"require('./package.json').version\"", "assign": "version"},
+  {"command": "gh release create v${vars.version}", "when": "prev.ok"}
+]}
+```
+
+### Dove `${...}` viene espanso
+
+Nei comandi, in `cwd`, nei valori di `env`, in `stdin`, nei path di file e
+directory, negli URL, negli header e nei query param delle richieste, nei
+messaggi e nei ref di git, nei nomi dei pacchetti, e in ogni step di
+`shell_bulk`.
+
+**Non** nel contenuto dei file, nei pattern regex e nei corpi delle patch: un
+template literal JavaScript, un workflow GitHub Actions e una regex contengono
+legittimamente `${...}`, e riscriverli sarebbe peggio che chiedere.
+
+Disponibile anche `${env.PATH}` per l'ambiente del server.
+
+### Non litiga con la shell
+
+`${...}` è **anche** sintassi shell. Tutto ciò che non nomina una variabile
+che il server conosce viene passato **intatto**, quindi `echo ${HOME}`,
+`${PATH%%:*}` e `${#arr}` arrivano a bash come sono. Solo i nomi che il
+server conosce vengono sostituiti.
+
+Se referenzi un `${vars.qualcosa}` che non esiste, il testo passa letterale e
+il risultato porta una nota che lo dice — così capisci di aver sbagliato il
+nome, invece di ritrovarti un valore vuoto senza sapere perché.
+
+`${...}` resta l'escape esplicito per un `${...}` letterale.
+
+*(Questo era un bug reale: prima della funzione, `shell_bulk` svuotava
+`${HOME}` e andava in errore su `${PATH%%:*}`. Ora entrambi sopravvivono, e
+c'è un test che lo verifica attraverso il server vero.)*
+
+### Segreti
+
+```
+vars { action: "set", name: "token", value: "...", secret: true }
+http_request { url: "...", headers: { Authorization: "Bearer ${vars.token}" } }
+```
+
+Un segreto funziona in ogni punto in cui funziona `${vars.…}` ma non viene
+mai restituito: `list` mostra `(secret)`, `get` lo maschera a meno di
+`reveal:true`, e non viene scritto nel file dello store (a meno di
+`persistSecrets`). Memorizzi un token una volta e lo usi senza che riappaia
+nella conversazione. Anche l'audit log lo sostituisce con `<secret>`.
+
+### Cosa conviene tenerci
+
+**Sì**: commit sha, numeri di versione, id restituiti da un'API, una base URL,
+un token, un path scoperto, un contatore tra retry, un blob JSON da
+interrogare più volte.
+
+**No**: qualsiasi cosa grossa. C'è un tetto per variabile (1MB di default). Per
+un payload pesante, scrivilo su file e tieni il **path** in una variabile.
+
+### Ciclo di vita
+
+Lo store vive quanto il processo del server ed è condiviso tra tutte le
+sessioni (come il registro dei job, e per lo stesso motivo: il server pilota
+*una* macchina). Con `varsFile` viene specchiato su disco e sopravvive a un
+riavvio; la scrittura è atomica (tmp + rename) e un file corrotto viene
+segnalato senza impedire l'avvio.
+
+`shell_info` riporta quante variabili sono impostate.
+
+---
+
 ## Profili dei tool
 
 Le definizioni dei tool costano token **a ogni richiesta**, non una volta sola.
@@ -285,10 +406,10 @@ Misurato sul server:
 
 | Profilo | Tool | Token di schema per richiesta |
 | --- | --- | --- |
-| `core` | 9 | ~4.100 |
-| `ops` | 17 | ~7.700 |
-| `dev` | 19 | ~8.500 |
-| `all` (default) | 25 | ~10.700 |
+| `core` | 10 | ~4.800 |
+| `ops` | 18 | ~8.500 |
+| `dev` | 20 | ~9.200 |
+| `all` (default) | 26 | ~11.500 |
 
 ```bash
 node bin/terminalmcp.js --tools core          # solo shell, job, bulk, file
@@ -298,7 +419,7 @@ node bin/terminalmcp.js --tools core,git,search
 node bin/terminalmcp.js --tools all,-watch,-archive
 ```
 
-`core` è sempre incluso. Un profilo di soli `-gruppo` significa "tutto
+`core` e `vars` sono sempre inclusi. Un profilo di soli `-gruppo` significa "tutto
 tranne quelli". Puoi anche metterlo in config (`"tools": "dev"`) o in
 `TERMINALMCP_TOOLS`.
 
@@ -500,6 +621,11 @@ gli script multi-riga e le virgolette funzionano senza sorprese di quoting.
 | `keepAnsi` | `false` | Mantiene i codici colore ANSI (costano token). |
 | `maxJobs` | `32` | Job in background contemporanei. |
 | `jobRetentionMs` | `1800000` | Quanto restano in memoria i job finiti. |
+| `varsFile` | `null` | Specchia lo store delle variabili su questo file. `null` = solo memoria. |
+| `persistSecrets` | `false` | Scrive anche le variabili `secret` su quel file. |
+| `maxVars` | `200` | Quante variabili si possono memorizzare. |
+| `maxVarBytes` | `1048576` | Tetto per singola variabile. |
+| `maxVarsTotalBytes` | `8388608` | Tetto complessivo dello store. |
 
 ### Guardrail (opzionali, disattivi per default)
 
@@ -522,7 +648,8 @@ dell'operatore e non un errore da aggirare.
 `TERMINALMCP_SHELL`, `TERMINALMCP_CWD`, `TERMINALMCP_TIMEOUT_MS`,
 `TERMINALMCP_MAX_OUTPUT_BYTES`, `TERMINALMCP_LOGIN`, `TERMINALMCP_KEEP_ANSI`,
 `TERMINALMCP_READ_ONLY`, `TERMINALMCP_LOG_FILE`, `TERMINALMCP_ALLOWED_ROOTS`,
-`TERMINALMCP_CONFIG`, `TERMINALMCP_TOOLS`, `TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`,
+`TERMINALMCP_CONFIG`, `TERMINALMCP_TOOLS`, `TERMINALMCP_VARS_FILE`,
+`TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`,
 `TERMINALMCP_HTTP_PORT`, `TERMINALMCP_HTTP_PATH`, `TERMINALMCP_HTTP_CORS`.
 
 ### Opzioni da riga di comando
@@ -532,7 +659,8 @@ node bin/terminalmcp.js --help
 ```
 
 `--cwd`, `--shell`, `--config`, `--timeout-ms`, `--max-output-bytes`,
-`--login`, `--read-only`, `--allowed-root`, `--log-file`, `--tools`.
+`--login`, `--read-only`, `--allowed-root`, `--log-file`, `--tools`,
+`--vars-file`, `--persist-secrets`, `--max-vars`, `--max-var-bytes`.
 
 Per il trasporto HTTP: `--http`, `--host`, `--port`, `--path`, `--no-cors`,
 `--strict-sessions`, `--sse-replies`, `--max-body-bytes`.
@@ -564,7 +692,9 @@ Comandi: `--doctor`, `--print-config`, `--list-tools`, `--help`, `--version`.
 14. Letture incrementali dei job via `offset`: i byte già visti non tornano.
 15. Un solo tool con `action` copre molte operazioni, invece di un tool per
     operazione: `git` da solo sostituirebbe 20 tool distinti.
-16. Descrizioni dei tool volutamente compatte — stanno nel contesto a ogni
+16. **Variabili lato server**: `assign` un valore invece di trascinarlo nella
+    conversazione, poi `${vars.nome}`.
+17. Descrizioni dei tool volutamente compatte — stanno nel contesto a ogni
     richiesta — e i **profili** per non pagare i gruppi che non usi.
 
 ---
@@ -572,10 +702,11 @@ Comandi: `--doctor`, `--print-config`, `--list-tools`, `--help`, `--version`.
 ## Test
 
 ```bash
-npm test              # 316 asserzioni in tutto
+npm test              # 383 asserzioni in tutto
 npm run test:smoke    # protocollo stdio, exec, job, bulk, file, profili (97)
 npm run test:guards   # guardrail: readOnly, allowedRoots, deny*        (14)
-npm run test:tools    # i 16 tool estesi: search, git, fs, archive, ...(156)
+npm run test:tools    # i tool estesi: search, git, fs, archive, ...    (156)
+npm run test:vars     # variabili, interpolazione, segreti, persistenza (67)
 npm run test:http     # trasporto HTTP: streamable + legacy SSE         (49)
 ```
 
@@ -593,6 +724,8 @@ bin/terminalmcp.js   CLI: argomenti, --doctor, --print-config, avvio
 src/server.js        JSON-RPC 2.0, metodi MCP, sessioni, audit log
 src/http.js          trasporto HTTP: Streamable HTTP + legacy HTTP+SSE
 src/tools/index.js   registry: gruppi, profili, costo in token
+src/tools/interpolate.js  quali campi ammettono `${...}`, dichiarati in un posto solo
+src/tools/vars.js    vars
 src/tools/core.js    shell, job, bulk, file read/write/edit
 src/tools/search.js  search_text, search_files
 src/tools/git.js     git
@@ -611,6 +744,7 @@ src/diff.js          diff per righe (LCS) e applicazione di patch unificate
 src/glob.js          matching glob e `.gitignore`
 src/walk.js          un solo walker per tutti i tool che scandiscono l'albero
 src/archive.js       ZIP e TAR implementati a mano (Node ha solo zlib)
+src/vars.js          store delle variabili: TTL, tetti, segreti, persistenza atomica
 src/files.js         file_read / file_write / file_edit / fs_list
 src/shells.js        rilevamento shell e strategia di invocazione per piattaforma
 src/config.js        caricamento config e precedenze

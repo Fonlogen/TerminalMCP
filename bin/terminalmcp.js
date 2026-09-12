@@ -61,12 +61,16 @@ Options:
   --read-only            block writes and command execution
   --allowed-root <dir>   restrict file tools to this directory (repeatable)
   --log-file <file>      append a JSONL audit log of tool calls
+  --vars-file <file>     mirror the server variable store to this file so it survives a restart
+  --persist-secrets      also write variables marked secret to that file
+  --max-vars <n>         how many variables may be stored (default 200)
+  --max-var-bytes <n>    size cap per variable (default 1048576)
   --tools <profile>      which tool groups to expose (default all). Tool schemas cost tokens
                          on every request, so trim them when you do not need them:
-                           all      everything (25 tools, ~10.7k tokens)
-                           core     shell, jobs, bulk, files only (9 tools, ~4.1k)
-                           dev      core + search, git, fs, dev, data (~8.5k)
-                           ops      core + search, fs, archive, sys, net (~7.7k)
+                           all      everything (26 tools, ~11.5k tokens)
+                           core     shell, jobs, bulk, files, vars (10 tools, ~4.8k)
+                           dev      core + search, git, fs, dev, data (~9.2k)
+                           ops      core + search, fs, archive, sys, net (~8.5k)
                          Or a list: --tools core,git,search  /  --tools all,-watch,-archive
                          Groups: ${GROUP_NAMES.join(', ')}
   -h, --help             this text
@@ -74,7 +78,7 @@ Options:
 
 Env: TERMINALMCP_SHELL, TERMINALMCP_CWD, TERMINALMCP_TIMEOUT_MS, TERMINALMCP_MAX_OUTPUT_BYTES,
      TERMINALMCP_LOGIN, TERMINALMCP_KEEP_ANSI, TERMINALMCP_READ_ONLY, TERMINALMCP_LOG_FILE,
-     TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG, TERMINALMCP_TOOLS,
+     TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG, TERMINALMCP_TOOLS, TERMINALMCP_VARS_FILE,
      TERMINALMCP_HTTP, TERMINALMCP_HTTP_HOST, TERMINALMCP_HTTP_PORT, TERMINALMCP_HTTP_PATH,
      TERMINALMCP_HTTP_CORS
 `;
@@ -94,6 +98,10 @@ function overridesFrom(args) {
   }
   if (args.max_jobs !== undefined) o.maxJobs = Number(args.max_jobs);
   if (typeof args.tools === 'string') o.tools = args.tools;
+  if (typeof args.vars_file === 'string') o.varsFile = args.vars_file;
+  if (args.persist_secrets) o.persistSecrets = true;
+  if (args.max_vars !== undefined) o.maxVars = Number(args.max_vars);
+  if (args.max_var_bytes !== undefined) o.maxVarBytes = Number(args.max_var_bytes);
 
   const http = {};
   if (args.http) http.enabled = true;
@@ -207,6 +215,7 @@ function doctor(cfg) {
     `read-only   ${cfg.readOnly}`,
     `allowedRoots ${cfg.allowedRoots.length ? cfg.allowedRoots.join(', ') : '(unrestricted)'}`,
     `denyCommands ${cfg.denyCommands.length || 0} pattern(s)`,
+    `vars store  ${cfg.varsFile ? `mirrored to ${cfg.varsFile}` : 'memory only'}, max ${cfg.maxVars} x ${cfg.maxVarBytes}B`,
     `profile     ${cfg.tools} -> ${toolset.groups.join(', ')}`,
     `tools       ${toolset.tools.length} tools, ~${toolset.estimatedTokens} tokens of schema per request`,
     ...describeGroups(toolset.groups).map(

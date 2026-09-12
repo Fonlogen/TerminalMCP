@@ -66,6 +66,18 @@
   // Append a JSONL audit line per tool call.
   "logFile": null,
 
+  // ---- Server-side variable store (the `vars` tool and ${vars.x}). ----
+
+  // Mirror the store to this file so variables survive a restart.
+  // null = memory only, forgotten when the server stops.
+  "varsFile": null,
+  // Write variables marked secret to that file too. Off by default: a file on
+  // disk is a different exposure than a value in a running process.
+  "persistSecrets": false,
+  "maxVars": 200,
+  "maxVarBytes": 1048576,
+  "maxVarsTotalBytes": 8388608,
+
   // Which tool groups to expose. Tool schemas sit in the model's context on
   // EVERY request, so a narrower profile is cheaper per call.
   //   "all"     every group          25 tools, ~10.7k tokens

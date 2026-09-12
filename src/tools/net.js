@@ -30,6 +30,7 @@ export const TOOLS = [
         follow_redirects: { type: 'boolean', description: 'Follow 3xx. Default true.' },
         insecure: { type: 'boolean', description: 'Accept invalid TLS certificates (self-signed dev servers).' },
         headers_only: { type: 'boolean', description: 'Report status and headers, skip the body.' },
+        assign: { type: 'string', description: 'Store the response body in the server variable of this name instead of relying on it coming back through the conversation. See the vars tool.' },
         max_bytes: { type: 'integer', description: 'Byte cap on the returned body. Default: server maxOutputBytes.' },
       },
       required: ['url'],
@@ -144,7 +145,7 @@ async function listeningPorts(cfg, wanted) {
   return { rows: [], via: null };
 }
 
-export function createHandlers({ cfg }) {
+export function createHandlers({ cfg, vars = null }) {
   return {
     async http_request(p) {
       if (!p.url) throw new Error('"url" is required');
@@ -237,10 +238,21 @@ export function createHandlers({ cfg }) {
         `${ms(elapsed)}${bytes ? ` ${humanBytes(bytes)}` : ''}`;
       const cut = shapeOutput(renderedBody, { maxBytes: p.max_bytes ?? cfg.maxOutputBytes, ansi: true, tidy: false });
 
+      let assigned = null;
+      if (p.assign && vars) {
+        try {
+          const entry = vars.set(p.assign, raw);
+          assigned = `stored ${entry.bytes} bytes in ${p.assign} — use it as \${vars.${p.assign}}`;
+        } catch (err) {
+          assigned = `not stored: ${err.message}`;
+        }
+      }
+
       return [
         head.trim(),
         shown.length ? shown.join('\n') : null,
         hidden ? `(${hidden} more header(s))` : null,
+        assigned,
         p.headers_only || method === 'HEAD' ? null : cut.text ? `--- body${cut.truncated ? ' TRUNCATED' : ''} ---\n${cut.text}` : '(empty body)',
       ]
         .filter(Boolean)

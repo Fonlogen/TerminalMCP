@@ -1,13 +1,13 @@
 ---
 name: terminalmcp
-description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, and read or write files surgically. Use whenever tools like shell_exec, shell_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool or archive are available, and especially before running several commands in a row, before reading a whole file, or when orienting yourself in an unfamiliar repository.
+description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, read or write files surgically, and keep values in server-side variables so they need not be re-sent. Use whenever tools like shell_exec, shell_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool, vars or archive are available, and especially before running several commands in a row, before reading a whole file, or when orienting yourself in an unfamiliar repository.
 ---
 
 # TerminalMCP
 
-Full terminal, filesystem and system control over MCP. Up to 25 tools in ten
-groups, built so a whole task fits in as few calls — and as few tokens — as
-possible.
+Full terminal, filesystem and system control over MCP. Up to 26 tools in
+eleven groups, built so a whole task fits in as few calls — and as few tokens —
+as possible.
 
 Not every group is always enabled. Call `shell_info` once if you need to know
 what you have; it reports the active profile. Anything not exposed as a tool is
@@ -56,6 +56,7 @@ GOOD: shell_bulk { steps: [
 | Processes and ports | `proc`, `net` |
 | React to files changing | `watch` |
 | base64, hashes, JWTs, timestamps | `encode` |
+| Keep a value for later without re-sending it | `vars`, or `assign` on shell_exec / http_request / bulk |
 | Which OS / shell / profile am I on | `shell_info` |
 
 ## shell_bulk — the workhorse
@@ -68,7 +69,8 @@ Steps run in order, in their own shell each. What each step can do:
 - `on_failure` — `"stop"` (default) or `"continue"`
 - `retry: { count, delay_ms }` — for flaky commands
 - `delay_before_ms` / `delay_after_ms` — wait for a service to come up
-- `assign` — capture the output into `vars.<name>` for later steps
+- `assign` — capture the output into `vars.<name>`, for later steps AND for
+  later calls (see [Server-side variables](#server-side-variables))
 - `capture` — how much output to return: `full` (default), `head`, `tail`,
   `on_failure`, `none`
 
@@ -258,6 +260,107 @@ pkg { action: "install" }
 A dev server started with `pkg run` will not exit — use `shell_exec_async`
 for that instead.
 
+## Server-side variables
+
+Values you capture can stay on the server. Store one, then reference it as
+`${vars.<name>}` in later calls — the value itself never travels back through
+the conversation.
+
+```
+shell_exec { command: "git rev-parse --short HEAD", assign: "sha" }
+shell_exec { command: "docker build -t app:${vars.sha} ." }
+```
+
+The second call spends no tokens on the sha. That is the point.
+
+### Setting and reading
+
+```
+vars { action: "set", name: "api", value: "https://api.example.com" }
+vars { action: "set", name: "cfg", value: {"port": 8080, "hosts": ["a","b"]} }
+vars { action: "list" }              names, types, sizes — NOT full values
+vars { action: "get", name: "cfg" }  the actual value, when you need to see it
+vars { action: "incr", name: "attempt" }
+vars { action: "append", name: "log", text: "another line" }
+vars { action: "delete", name: "sha" }
+vars { action: "load", name: "conf", path: "config.json", json: true }
+vars { action: "save", name: "report", path: "out.txt" }
+```
+
+`list` deliberately shows previews, not values — dumping the store would undo
+the saving. Call `get` when you actually need to read one.
+
+### Capturing without ever seeing it
+
+Three tools write straight into the store:
+
+```
+shell_exec   { command: "...", assign: "name" }     stores trimmed stdout
+http_request { url: "...", assign: "body" }         stores the response body
+shell_bulk   steps: [{ ..., assign: "name" }]       stores per step
+```
+
+A `shell_bulk` `assign` is visible to later steps in the same run *and* kept
+for later calls. And every step can already read the whole store, so you do not
+need to pass values into a bulk run that are already there.
+
+```json
+{"steps": [
+  {"id": "ver", "command": "node -p \"require('./package.json').version\"", "assign": "version"},
+  {"command": "gh release create v${vars.version}", "when": "prev.ok"}
+]}
+```
+
+### Where ${...} expands
+
+In commands, `cwd`, `env` values, `stdin`, file and directory paths, URLs,
+request headers, query params, git messages and refs, package names, and every
+`shell_bulk` step.
+
+**Not** in file content, regex patterns or patch bodies — a JS template
+literal, a GitHub Actions workflow and a regex all legitimately contain
+`${...}`, and rewriting them would be worse than making you ask.
+
+Also available: `${env.PATH}` for the server's environment.
+
+### It does not fight the shell
+
+`${...}` is shell syntax too. Anything that does not name a variable this
+server knows is passed through untouched, so `echo ${HOME}`,
+`${PATH%%:*}` and `${#arr}` still reach bash intact. Only names it knows
+get substituted.
+
+If you reference `${vars.something}` that is not set, the text is passed
+through literally and the result carries a note saying so — that is your cue
+that you mistyped a name, not that the value was empty.
+
+Write `${...}` when you want a literal `${...}` regardless.
+
+### Secrets
+
+```
+vars { action: "set", name: "token", value: "...", secret: true }
+http_request { url: "...", headers: { Authorization: "Bearer ${vars.token}" } }
+```
+
+A secret works everywhere `${vars.…}` works but is never echoed back: `list`
+shows `(secret)`, `get` masks it unless you pass `reveal: true`, and it is not
+written to the store file. Store a token once and use it without it reappearing
+in the conversation.
+
+### What to keep there
+
+Good: commit shas, version strings, ids returned by an API, a base URL, a
+token, a discovered path, a counter across retries, a JSON blob you will query
+repeatedly.
+
+Not: anything large. There is a per-variable size cap (1MB by default). For a
+big payload, write it to a file and keep the *path* in a variable.
+
+The store is shared across sessions and lives as long as the server process
+(or longer, if the operator configured `varsFile`). `shell_info` reports how
+many variables are set.
+
 ## Long-running work
 
 Never block on a 10-minute build. Start it, then poll with one call:
@@ -351,7 +454,9 @@ that is a deliberate operator setting: report it, do not try to work around it.
 7. `capture: "on_failure"` or `"none"` for bulk steps whose output you do not need.
 8. `git diff stat: true` and `git log` instead of raw patches you will not read.
 9. `quiet: true` on `shell_exec` when the exit code is the whole answer.
-10. Background anything slow instead of waiting on it.
+10. `assign` a value into a server variable instead of carrying it through
+    the conversation, then use `${vars.name}`.
+11. Background anything slow instead of waiting on it.
 
 ## Things that will bite you
 

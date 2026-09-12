@@ -7,6 +7,8 @@ import process from 'node:process';
 import { appendFile } from 'node:fs/promises';
 import { buildToolset } from './tools/index.js';
 import { stopAllWatchers } from './tools/watch.js';
+import { VarStore } from './vars.js';
+import { applyInterpolation, varContext, unresolvedNote } from './tools/interpolate.js';
 import { JobManager } from './jobs.js';
 import { PolicyError } from './guards.js';
 
@@ -36,9 +38,21 @@ export class Server {
   constructor(cfg) {
     this.cfg = cfg;
     this.jobs = new JobManager(cfg);
+    this.vars = new VarStore({
+      varsFile: cfg.varsFile,
+      persistSecrets: cfg.persistSecrets,
+      maxVars: cfg.maxVars,
+      maxVarBytes: cfg.maxVarBytes,
+      maxTotalBytes: cfg.maxVarsTotalBytes,
+    });
     // The active toolset depends on cfg.tools, so it is built per server
     // rather than being a module-level constant.
-    const toolset = buildToolset(cfg.tools, { cfg, jobs: this.jobs, server: this });
+    const toolset = buildToolset(cfg.tools, {
+      cfg,
+      jobs: this.jobs,
+      vars: this.vars,
+      server: this,
+    });
     this.tools = toolset.tools;
     this.handlers = toolset.handlers;
     this.toolGroups = toolset.groups;
@@ -151,17 +165,25 @@ export class Server {
     }
 
     const startedAt = Date.now();
+    // ${vars.…} is expanded here rather than in 25 handlers; see
+    // tools/interpolate.js for exactly which fields are eligible.
+    const { args: expanded, unresolved } = applyInterpolation(name, args, varContext(this.vars));
+
     try {
-      const text = await handler(args);
-      this.audit({ tool: name, ok: true, ms: Date.now() - startedAt, args: redact(args) });
-      return result(id, { content: [{ type: 'text', text: String(text) }] });
+      const text = await handler(expanded);
+      const note = unresolvedNote(unresolved, this.vars);
+      this.audit({ tool: name, ok: true, ms: Date.now() - startedAt, args: redact(expanded) });
+      return result(id, {
+        content: [{ type: 'text', text: note ? `${text}\n${note}` : String(text) }],
+      });
     } catch (err) {
-      this.audit({ tool: name, ok: false, ms: Date.now() - startedAt, error: err.message, args: redact(args) });
+      this.audit({ tool: name, ok: false, ms: Date.now() - startedAt, error: err.message, args: redact(expanded) });
       const prefix = err instanceof PolicyError ? 'Policy' : 'Error';
       // Tool failures come back as content with isError, not as protocol
       // errors: the model needs to read the message and correct itself.
+      const note = unresolvedNote(unresolved, this.vars);
       return result(id, {
-        content: [{ type: 'text', text: `${prefix}: ${err.message}` }],
+        content: [{ type: 'text', text: `${prefix}: ${err.message}${note ? `\n${note}` : ''}` }],
         isError: true,
       });
     }
@@ -170,6 +192,8 @@ export class Server {
 
 function redact(args) {
   const out = { ...args };
+  // A secret being stored must not land in the audit log in plain text.
+  if (out.secret === true && out.value !== undefined) out.value = '<secret>';
   if (typeof out.content === 'string') out.content = `<${out.content.length} chars>`;
   if (typeof out.stdin === 'string') out.stdin = `<${out.stdin.length} chars>`;
   if (typeof out.data === 'string') out.data = `<${out.data.length} chars>`;
@@ -224,6 +248,7 @@ export function serveStdio(server, { input = process.stdin, output = process.std
   });
 
   const shutdown = (why) => {
+    server.vars.flush();
     const n = server.jobs.killAll('SIGTERM');
     const w = stopAllWatchers();
     if (n || w) log(`${why}: terminated ${n} job(s), closed ${w} watcher(s)`);

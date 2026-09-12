@@ -40,7 +40,7 @@ function okForStep(exitCode, expect) {
  * Each result is the object visible to later steps as prev / step.<id> /
  * steps[i], so keep its shape stable.
  */
-export async function runBulk(cfg, params) {
+export async function runBulk(cfg, params, { store = null } = {}) {
   const {
     steps,
     cwd: baseCwd,
@@ -61,7 +61,12 @@ export async function runBulk(cfg, params) {
 
   const results = [];
   const byId = {};
-  const vars = { ...initialVars };
+  // The persistent store is the base; this run's `vars` param layers over it.
+  // So a step can read something a previous call captured, without it having
+  // been re-sent.
+  const vars = { ...(store ? store.snapshot() : {}), ...initialVars };
+  const storeErrors = [];
+  const unresolved = [];
   let failedCount = 0;
   let okCount = 0;
   let skippedCount = 0;
@@ -120,9 +125,9 @@ export async function runBulk(cfg, params) {
     let stdin;
     try {
       const c = ctx();
-      command = interpolate(spec.command, c);
-      stepCwd = spec.cwd !== undefined ? interpolate(spec.cwd, c) : baseCwd;
-      stdin = spec.stdin !== undefined ? interpolate(spec.stdin, c) : undefined;
+      command = interpolate(spec.command, c, { unresolved });
+      stepCwd = spec.cwd !== undefined ? interpolate(spec.cwd, c, { unresolved }) : baseCwd;
+      stdin = spec.stdin !== undefined ? interpolate(spec.stdin, c, { unresolved }) : undefined;
     } catch (err) {
       throw new Error(`steps[${i}] (${id}) interpolation failed: ${err.message}`);
     }
@@ -203,6 +208,7 @@ export async function runBulk(cfg, params) {
       attempts: attempt,
       error: run.error || null,
       suppressed: shaped.suppressed,
+      assigned: spec.assign || null,
     };
     results.push(r);
     byId[id] = r;
@@ -217,6 +223,15 @@ export async function runBulk(cfg, params) {
         : src === 'combined' ? run.combined.trim()
         : run.stdout.trim();
       vars[spec.assign] = value;
+      // Also persist it, so the value outlives this call and does not have to
+      // come back through the conversation to be used again.
+      if (store) {
+        try {
+          store.set(spec.assign, value);
+        } catch (err) {
+          storeErrors.push(`${spec.assign}: ${err.message}`);
+        }
+      }
     }
 
     await sleep(num(spec.delay_after_ms, 0));
@@ -235,6 +250,8 @@ export async function runBulk(cfg, params) {
   return {
     results,
     vars,
+    storeErrors,
+    unresolved,
     aborted,
     abortReason,
     stats: {
@@ -308,7 +325,7 @@ function num(v, dflt) {
 
 /** Compact human/model-readable bulk report. */
 export function renderBulk(out) {
-  const { stats, results, vars, aborted, abortReason } = out;
+  const { stats, results, aborted, abortReason } = out;
   const head =
     `BULK ${stats.total} steps: ${stats.ok} ok, ${stats.failed} failed, ` +
     `${stats.skipped} skipped` +
@@ -340,9 +357,24 @@ export function renderBulk(out) {
     if (r.suppressed && !r.ok) lines.push(`    (output suppressed: ${r.suppressed})`);
   }
 
-  const varKeys = Object.keys(vars);
-  if (varKeys.length) {
-    lines.push(`vars: ${varKeys.map((k) => `${k}=${oneLine(String(vars[k]), 120)}`).join(' ')}`);
+  // Only the variables this run assigned are worth echoing; the whole store
+  // would be noise (and defeats the point of keeping values server-side).
+  const assigned = results
+    .map((r) => r.assigned)
+    .filter(Boolean);
+  if (assigned.length) {
+    lines.push(
+      `vars: ${assigned.map((k) => `${k}=${oneLine(String(out.vars[k]), 120)}`).join(' ')}`,
+    );
+  }
+  if (out.unresolved?.length) {
+    lines.push(
+      `note: ${out.unresolved.map((u) => `\${${u}}`).join(', ')} did not resolve and was passed ` +
+      `through literally.`,
+    );
+  }
+  if (out.storeErrors?.length) {
+    lines.push(`not stored: ${out.storeErrors.join('; ')}`);
   }
   return lines.join('\n');
 }

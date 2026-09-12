@@ -15,6 +15,7 @@ import * as net from './net.js';
 import * as dev from './dev.js';
 import * as data from './data.js';
 import * as watch from './watch.js';
+import * as varsTool from './vars.js';
 
 /** Group modules export TOOLS + createHandlers; normalise that shape here. */
 function group(label, mod) {
@@ -33,6 +34,9 @@ export const GROUPS = {
     createHandlers: createCoreHandlers,
     always: true,
   },
+  // Always on: ${vars.…} expansion is always active, so being unable to set
+  // a variable would be a confusing half-feature.
+  vars: { ...group('server-side variables reusable across calls', varsTool), always: true },
   search: group('grep a tree, find files, project-wide replace', search),
   git: group('git status/log/diff/branch/commit and raw passthrough', git),
   fs: group('copy, move, delete, stat, hash, chmod, tree, disk usage', fsops),

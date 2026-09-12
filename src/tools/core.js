@@ -38,6 +38,7 @@ export const CORE_TOOLS = [
         max_output_bytes: S.maxOut,
         merge_streams: { type: 'boolean', description: 'Report stderr inside stdout as one block (fewer tokens). Default false.' },
         quiet: { type: 'boolean', description: 'Return only the exit code line, no output. Default false.' },
+        assign: { type: 'string', description: 'Store the trimmed stdout in the server variable of this name, reusable later as ${vars.<name>} without passing it back. See the vars tool.' },
         login: { type: 'boolean', description: 'Run through a login shell so ~/.profile aliases and PATH apply.' },
       },
       required: ['command'],
@@ -132,7 +133,7 @@ export const CORE_TOOLS = [
                 },
                 description: 'Retry the step while it keeps failing.',
               },
-              assign: { type: 'string', description: 'Store this step output in vars.<name> for later steps / ${...}.' },
+              assign: { type: 'string', description: 'Store this step output in vars.<name> — visible to later steps AND kept in the server variable store, so later CALLS can use ${vars.<name>} without it being passed back.' },
               assign_from: { type: 'string', enum: ['stdout', 'stderr', 'combined', 'exit'], description: 'What assign captures. Default stdout (trimmed).' },
               capture: { type: 'string', enum: ['full', 'head', 'tail', 'on_failure', 'none'], description: 'How much of this step output to return. Default full.' },
               max_output_bytes: S.maxOut,
@@ -148,7 +149,7 @@ export const CORE_TOOLS = [
         capture: { type: 'string', enum: ['full', 'head', 'tail', 'on_failure', 'none'], description: 'Default capture mode for every step. Default full.' },
         max_output_bytes: S.maxOut,
         max_total_bytes: { type: 'integer', description: 'Total output budget for the whole run; later steps get suppressed once spent. Default 40000.' },
-        vars: { type: 'object', additionalProperties: { type: 'string' }, description: 'Initial variables, readable as vars.<name>.' },
+        vars: { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra variables for this run, layered over the persistent store. Everything already in the store is readable as vars.<name> without repeating it here.' },
       },
       required: ['steps'],
     },
@@ -279,7 +280,7 @@ export const CORE_TOOLS = [
 
 // ------------------------------------------------------------------ handlers
 
-export function createCoreHandlers({ cfg, jobs, server = null }) {
+export function createCoreHandlers({ cfg, jobs, vars = null, server = null }) {
   return {
     async shell_exec(a) {
       requireString(a, 'command');
@@ -294,9 +295,23 @@ export function createCoreHandlers({ cfg, jobs, server = null }) {
         login: a.login,
       });
 
+      let assigned = null;
+      if (a.assign && vars) {
+        try {
+          const entry = vars.set(a.assign, run.stdout.trim());
+          assigned = `stored ${entry.bytes} bytes in ${a.assign} — use it as \${vars.${a.assign}}`;
+        } catch (err) {
+          assigned = `not stored: ${err.message}`;
+        }
+      }
+
       if (a.quiet) {
-        return `exit=${run.exitCode === null ? 'killed' : run.exitCode} ${ms(run.durationMs)}` +
-          (run.timedOut ? ' TIMED_OUT' : '') + (run.error ? ` error: ${run.error}` : '');
+        return (
+          `exit=${run.exitCode === null ? 'killed' : run.exitCode} ${ms(run.durationMs)}` +
+          (run.timedOut ? ' TIMED_OUT' : '') +
+          (run.error ? ` error: ${run.error}` : '') +
+          (assigned ? `\n${assigned}` : '')
+        );
       }
 
       const limit = a.max_output_bytes ?? cfg.maxOutputBytes;
@@ -310,7 +325,8 @@ export function createCoreHandlers({ cfg, jobs, server = null }) {
         stderr: merged ? '' : shapeOutput(run.stderr, opts).text,
       };
       const body = renderResult(view, { showCwd: Boolean(a.cwd) });
-      return run.error ? `${body}\nspawn error: ${run.error}` : body;
+      const tail = [run.error ? `spawn error: ${run.error}` : null, assigned].filter(Boolean);
+      return tail.length ? `${body}\n${tail.join('\n')}` : body;
     },
 
     async shell_exec_async(a) {
@@ -418,7 +434,7 @@ export function createCoreHandlers({ cfg, jobs, server = null }) {
     },
 
     async shell_bulk(a) {
-      const out = await runBulk(cfg, a);
+      const out = await runBulk(cfg, a, { store: vars });
       return renderBulk(out);
     },
 
@@ -453,6 +469,10 @@ export function createCoreHandlers({ cfg, jobs, server = null }) {
         `config file: ${cfg.configPath || '(none — using defaults)'}`,
         `guardrails: ${guards.length ? guards.join(' | ') : 'none (full access)'}`,
         `jobs: ${live.length} tracked, ${live.filter((j) => j.run.running).length} running`,
+        vars
+          ? `variables: ${vars.list().length} set${cfg.varsFile ? ` (mirrored to ${cfg.varsFile})` : ''}` +
+            `${vars.list().length ? ` — ${vars.list().map((v) => v.name).slice(0, 20).join(', ')}` : ''}`
+          : null,
         toolLine,
       ]
         .filter(Boolean)

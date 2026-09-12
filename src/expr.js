@@ -276,41 +276,96 @@ export function evaluateValue(src, ctx) {
 
 /**
  * Replace every ${expr} in `template` with its evaluated value.
- * `$${...}` is an escape that yields a literal ${...}.
+ *
+ * `${...}` is ALSO shell syntax (`${HOME}`, `${PATH%%:*}`, `${#arr}`) and
+ * GitHub Actions syntax (`${{ matrix.node }}`), so anything that does not
+ * resolve to a defined value is left exactly as written and passed through to
+ * whatever consumes it. Only names this context actually knows get replaced.
+ * That way `echo ${HOME}` still reaches bash intact while `${vars.sha}` is
+ * substituted here.
+ *
+ * `$${...}` is an explicit escape that yields a literal `${...}`.
+ *
+ * Names that looked like a lookup but resolved to nothing are pushed onto
+ * `unresolved`, so a caller can point out a likely typo instead of leaving it
+ * silently wrong.
  */
-export function interpolate(template, ctx) {
+/** Roots this context owns — used to tell a typo from shell syntax. */
+const OURS_RE = /^(vars|prev|step|steps|env|platform|failed_count|ok_count|skipped_count|index)\b/;
+
+export function interpolate(template, ctx, { unresolved = null } = {}) {
   if (typeof template !== 'string' || !template.includes('${')) return template;
   let out = '';
   let i = 0;
+
   while (i < template.length) {
     const at = template.indexOf('${', i);
     if (at === -1) { out += template.slice(i); break; }
+
     if (at > 0 && template[at - 1] === '$') {
       // `$${x}` -> literal `${x}`
       out += template.slice(i, at - 1) + '${';
       i = at + 2;
       const close = findClose(template, i);
+      if (close === -1) { out += template.slice(i); break; }
       out += template.slice(i, close) + '}';
       i = close + 1;
       continue;
     }
+
     out += template.slice(i, at);
     const close = findClose(template, at + 2);
-    const expr = template.slice(at + 2, close).trim();
-    const val = expr === '' ? '' : evaluateValue(expr, ctx);
-    out += val === null || val === undefined ? '' : String(val);
+    if (close === -1) {
+      // Unclosed: it is not ours to interpret.
+      out += template.slice(at);
+      break;
+    }
+
+    const raw = template.slice(at + 2, close);
+    const expr = raw.trim();
+    const literal = `\${${raw}}`;
+
+    if (expr === '') {
+      out += literal;
+      i = close + 1;
+      continue;
+    }
+
+    let value;
+    try {
+      value = evaluateValue(expr, ctx);
+    } catch {
+      // Not an expression we can parse (shell or Actions syntax): pass it on.
+      out += literal;
+      i = close + 1;
+      continue;
+    }
+
+    if (value === undefined) {
+      // Parsed, but nothing by that name here. Only flag it when it names one
+      // of OUR roots: a bare `${SOMETHING}` is almost certainly shell syntax,
+      // and calling that a typo would be noise on every second command.
+      if (unresolved && OURS_RE.test(expr) && !unresolved.includes(expr)) unresolved.push(expr);
+      out += literal;
+      i = close + 1;
+      continue;
+    }
+
+    out += value === null ? '' : String(value);
     i = close + 1;
   }
+
   return out;
 }
 
+/** Index of the matching `}`, or -1 when there is none. */
 function findClose(s, from) {
   let depth = 1;
   for (let i = from; i < s.length; i++) {
     if (s[i] === '{') depth++;
     else if (s[i] === '}' && --depth === 0) return i;
   }
-  throw new Error(`Unclosed \${...} in: ${s}`);
+  return -1;
 }
 
 export const FUNCTION_NAMES = Object.keys(FUNCS);

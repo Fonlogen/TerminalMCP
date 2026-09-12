@@ -50,6 +50,16 @@ export const DEFAULTS = {
   readOnly: false,
   // Append a JSONL audit log of every tool call here.
   logFile: null,
+  // --- Server-side variable store (the `vars` tool and ${vars.x}). ---
+  // Mirror the store to this file so it survives a restart. null = memory only.
+  varsFile: null,
+  // Persist values marked secret to that file too. Off: a file on disk is a
+  // different exposure than a value in a running process.
+  persistSecrets: false,
+  maxVars: 200,
+  maxVarBytes: 1048576,
+  maxVarsTotalBytes: 8388608,
+
   // Which tool groups to expose. Tool schemas sit in the model's context on
   // every request, so a smaller profile is cheaper. "all" (default), "core",
   // "dev", "ops", a list like "core,git,search", or removals: "all,-watch".
@@ -104,6 +114,7 @@ function envOverrides() {
   if (e.TERMINALMCP_READ_ONLY) out.readOnly = truthy(e.TERMINALMCP_READ_ONLY);
   if (e.TERMINALMCP_LOG_FILE) out.logFile = e.TERMINALMCP_LOG_FILE;
   if (e.TERMINALMCP_TOOLS) out.tools = e.TERMINALMCP_TOOLS;
+  if (e.TERMINALMCP_VARS_FILE) out.varsFile = e.TERMINALMCP_VARS_FILE;
   if (e.TERMINALMCP_ALLOWED_ROOTS) {
     out.allowedRoots = e.TERMINALMCP_ALLOWED_ROOTS.split(/[;:](?![\\/])/).filter(Boolean);
   }

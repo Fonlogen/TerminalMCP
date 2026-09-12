@@ -104,9 +104,9 @@ async function main() {
     const list = await c.send('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
     // The default profile is "all"; the core-only profile is checked below.
-    check('tools/list exposes the full profile', names.length === 25, `${names.length}: ${names.join(',')}`);
+    check('tools/list exposes the full profile', names.length === 26, `${names.length}: ${names.join(',')}`);
     check('core tools are present', ['shell_exec', 'shell_bulk', 'file_edit'].every((n) => names.includes(n)), names.join(','));
-    check('extended groups are present', ['search_text', 'git', 'fs_op', 'archive', 'sys_info', 'proc', 'http_request', 'net', 'pkg', 'project_info', 'code', 'json_tool', 'diff', 'encode', 'watch'].every((n) => names.includes(n)), names.join(','));
+    check('extended groups are present', ['search_text', 'git', 'fs_op', 'archive', 'sys_info', 'proc', 'http_request', 'net', 'pkg', 'project_info', 'code', 'json_tool', 'diff', 'encode', 'watch', 'vars'].every((n) => names.includes(n)), names.join(','));
     check('every tool has an inputSchema', (list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'));
 
     const bogus = await c.send('does/not/exist', {});
@@ -435,12 +435,13 @@ async function main() {
       });
       const coreList = await core.send('tools/list', {});
       const coreNames = (coreList.result?.tools ?? []).map((t) => t.name);
-      check('--tools core exposes only the 9 core tools', coreNames.length === 9, coreNames.join(','));
+      // core + vars: the vars group is always on, since ${vars.…} expansion always is.
+      check('--tools core exposes the core group plus vars', coreNames.length === 10 && coreNames.includes('vars'), coreNames.join(','));
       check('--tools core drops the extra groups', !coreNames.includes('git') && !coreNames.includes('search_text'), coreNames.join(','));
       const gone = await core.call('git', { action: 'status' });
       check('a tool outside the profile is rejected', gone.isError, gone.text.slice(0, 120));
       const info = await core.call('shell_info', {});
-      check('shell_info reports the active profile', /tools: 9 in groups \[core\]/.test(info.text), info.text.slice(0, 300));
+      check('shell_info reports the active profile', /tools: 10 in groups \[core vars\]/.test(info.text), info.text.slice(0, 300));
       core.close();
 
       const dev = new Client(dir, ['--tools', 'dev']);
@@ -457,7 +458,7 @@ async function main() {
         protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'profile-test', version: '1' },
       });
       const trimmedNames = ((await trimmed.send('tools/list', {})).result?.tools ?? []).map((t) => t.name);
-      check('removals in a profile work', trimmedNames.length === 23 && !trimmedNames.includes('watch') && !trimmedNames.includes('archive'), trimmedNames.join(','));
+      check('removals in a profile work', trimmedNames.length === 24 && !trimmedNames.includes('watch') && !trimmedNames.includes('archive'), trimmedNames.join(','));
       trimmed.close();
     }
 

@@ -12,6 +12,7 @@ Progettato con due obiettivi: **controllo totale** e **risparmio di token**.
   `./start-http.sh` o `start-http.cmd` (remoto, HTTP).
 - **Due trasporti.** stdio in locale; via HTTP sia Streamable HTTP
   (MCP 2025-06-18) che il legacy HTTP+SSE (MCP 2024-11-05), senza autenticazione.
+- **25 tool in 10 gruppi**, accendibili a gruppi per non pagare token inutili.
 - **Skill incluso** che insegna al modello come usarlo spendendo pochi token.
 
 ---
@@ -185,6 +186,12 @@ Se un domani volessi restringere le capacità invece della rete, ci sono già
 
 ## I tool
 
+25 tool in 10 gruppi. Le definizioni dei tool stanno nel contesto del modello
+**a ogni richiesta**, quindi i gruppi si accendono e spengono: vedi
+[Profili](#profili-dei-tool).
+
+### core — sempre attivo (9 tool)
+
 | Tool | A cosa serve |
 | --- | --- |
 | `shell_exec` | Esegue un comando e aspetta: exit code, stdout, stderr. |
@@ -195,7 +202,118 @@ Se un domani volessi restringere le capacità invece della rete, ci sono già
 | `file_write` | Scrive un file intero (`overwrite`, `append`, `prepend`, `create_new`). |
 | `file_edit` | Modifica *parti* di un file: più operazioni in una sola chiamata, atomiche. |
 | `fs_list` | Elenca una directory, con profondità e filtro glob. |
-| `shell_info` | Riporta piattaforma, shell attiva, shell disponibili, config e guardrail. |
+| `shell_info` | Piattaforma, shell attiva e disponibili, config, guardrail, profilo attivo. |
+
+### search (2 tool)
+
+| Tool | A cosa serve |
+| --- | --- |
+| `search_text` | Grep su tutto l'albero: regex o literal, solo le righe che matchano, con contesto opzionale. Salta `.git`/`node_modules`/build e i binari, rispetta `.gitignore`. Modalità `files_only` e `count_only` per spendere ancora meno. Con `replace` fa il find&replace su tutto il progetto (`dry_run` mostra il diff). |
+| `search_files` | Trova file e directory per glob, nome, dimensione o data. Ordina per path, size o mtime. |
+
+### git (1 tool)
+
+`git` con azioni e output compattato. Lettura: `status`, `log`, `diff`,
+`show`, `blame`, `branches`, `tags`, `remotes`, `stash_list`,
+`file_history`, `current`, `root`, `config_get`. Scrittura: `add`,
+`unstage`, `commit`, `checkout`, `branch_create`, `branch_delete`,
+`merge`, `rebase`, `reset`, `revert`, `restore`, `stash`,
+`stash_pop`, `tag_create`, `fetch`, `pull`, `push`, `apply`,
+`clean`, `init`. Qualsiasi altra cosa: `action:"raw"` con `args`.
+
+git viene invocato **direttamente, non tramite shell**: un messaggio di commit
+con virgolette, newline o `$` non ha bisogno di alcun escaping.
+
+### fs (1 tool)
+
+`fs_op` — `copy`, `move`, `delete`, `mkdir`, `touch`, `stat`,
+`chmod`, `symlink`, `readlink`, `hash` (md5/sha1/sha256/sha512),
+`disk_usage` (cosa occupa spazio), `tree`. `delete` rifiuta una directory
+non vuota senza `recursive:true`.
+
+### archive (1 tool)
+
+`archive` — `create`, `list`, `extract`, `gzip`, `gunzip` per zip,
+tar, tar.gz e gzip. **ZIP e TAR sono implementati nel server** (Node ha solo
+zlib), quindi funzionano identici su Windows, macOS e Linux senza dipendere da
+un binario `tar`/`zip` installato. In estrazione i path che escono dalla
+destinazione vengono rifiutati (zip-slip).
+
+### sys (2 tool)
+
+| Tool | A cosa serve |
+| --- | --- |
+| `sys_info` | `overview`, `cpu`, `memory`, `disk` (spazio libero per mount), `network`, `env`, `uptime`, `user`. |
+| `proc` | `list` (filtro per nome, ordina per cpu/memoria), `tree`, `info`, `kill` (per pid, opzionalmente con i figli, o per nome — che richiede `confirm:true`). |
+
+### net (2 tool)
+
+| Tool | A cosa serve |
+| --- | --- |
+| `http_request` | Client HTTP(S): status, tempi, header, body. Il JSON viene indentato, i body lunghi troncati. `json`, `form`, `query`, `insecure`, `headers_only`. |
+| `net` | `dns` (A/AAAA/MX/TXT/CNAME/NS/PTR/ALL), `tcp_check`, `listening` (porte aperte e di chi sono), `interfaces`, `ping`. |
+
+### dev (3 tool)
+
+| Tool | A cosa serve |
+| --- | --- |
+| `pkg` | Pilota il package manager che il progetto usa davvero, rilevandolo dal lockfile: npm, pnpm, yarn, bun, deno, pip, uv, poetry, pipenv, cargo, go, composer, bundler, maven, gradle, dotnet. Azioni: `detect`, `install`, `add`, `remove`, `run`, `scripts`, `list`, `outdated`. |
+| `project_info` | **Orientarsi in un repo sconosciuto in UNA chiamata**: linguaggi per file e righe, package manager, dipendenze e framework rilevati, script disponibili, entry point, comandi probabili per test/build/lint, branch git e stato, file di configurazione. |
+| `code` | `outline` (funzioni, classi, tipi di un file con i numeri di riga — da leggere *prima* del file), `imports`, `todos` (TODO/FIXME/HACK/XXX), `stats` (righe di codice per linguaggio). |
+
+### data (3 tool)
+
+| Tool | A cosa serve |
+| --- | --- |
+| `json_tool` | `get`, `set`, `delete`, `merge` (profondo), `keys`, `validate`, `format` su un file JSON o su testo inline. I path sono tipo `scripts.build` o `items[0].name`. Patcha un singolo path invece di riscrivere il documento. |
+| `diff` | `files` (diff unificato tra due file), `text` (tra due stringhe), `apply` (applica una patch — i numeri di riga degli hunk vengono ritrovati per contesto, quindi la patch si applica anche se il file si è spostato). |
+| `encode` | base64/hex/url/html encode e decode, `hash`, `uuid`, `random`, `jwt_decode` (firma **non** verificata), `timestamp` (epoch ↔ ISO). |
+
+### watch (1 tool)
+
+`watch` — `start` restituisce un `watch_id`, `poll` si blocca fino a
+`wait_ms` in attesa di cambiamenti (una chiamata invece di un ciclo di
+polling), `list`, `stop`. Gli eventi vengono raggruppati per path, così un
+salvataggio che ne genera tre viene riportato una volta.
+
+---
+
+## Profili dei tool
+
+Le definizioni dei tool costano token **a ogni richiesta**, non una volta sola.
+Misurato sul server:
+
+| Profilo | Tool | Token di schema per richiesta |
+| --- | --- | --- |
+| `core` | 9 | ~4.100 |
+| `ops` | 17 | ~7.700 |
+| `dev` | 19 | ~8.500 |
+| `all` (default) | 25 | ~10.700 |
+
+```bash
+node bin/terminalmcp.js --tools core          # solo shell, job, bulk, file
+node bin/terminalmcp.js --tools dev           # core + search, git, fs, dev, data
+node bin/terminalmcp.js --tools ops           # core + search, fs, archive, sys, net
+node bin/terminalmcp.js --tools core,git,search
+node bin/terminalmcp.js --tools all,-watch,-archive
+```
+
+`core` è sempre incluso. Un profilo di soli `-gruppo` significa "tutto
+tranne quelli". Puoi anche metterlo in config (`"tools": "dev"`) o in
+`TERMINALMCP_TOOLS`.
+
+Per vedere il costo dei gruppi e cosa è attivo:
+
+```bash
+node bin/terminalmcp.js --list-tools
+node bin/terminalmcp.js --doctor
+```
+
+Anche `shell_info` lo riporta al modello a runtime, così la decisione di
+tagliare è informata invece che a sensazione. E niente va perso comunque:
+quello che non è esposto come tool resta raggiungibile con `shell_exec`.
+
+---
 
 ### `shell_bulk`: il cuore del risparmio token
 
@@ -404,7 +522,7 @@ dell'operatore e non un errore da aggirare.
 `TERMINALMCP_SHELL`, `TERMINALMCP_CWD`, `TERMINALMCP_TIMEOUT_MS`,
 `TERMINALMCP_MAX_OUTPUT_BYTES`, `TERMINALMCP_LOGIN`, `TERMINALMCP_KEEP_ANSI`,
 `TERMINALMCP_READ_ONLY`, `TERMINALMCP_LOG_FILE`, `TERMINALMCP_ALLOWED_ROOTS`,
-`TERMINALMCP_CONFIG`, `TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`,
+`TERMINALMCP_CONFIG`, `TERMINALMCP_TOOLS`, `TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`,
 `TERMINALMCP_HTTP_PORT`, `TERMINALMCP_HTTP_PATH`, `TERMINALMCP_HTTP_CORS`.
 
 ### Opzioni da riga di comando
@@ -414,7 +532,7 @@ node bin/terminalmcp.js --help
 ```
 
 `--cwd`, `--shell`, `--config`, `--timeout-ms`, `--max-output-bytes`,
-`--login`, `--read-only`, `--allowed-root`, `--log-file`.
+`--login`, `--read-only`, `--allowed-root`, `--log-file`, `--tools`.
 
 Per il trasporto HTTP: `--http`, `--host`, `--port`, `--path`, `--no-cors`,
 `--strict-sessions`, `--sse-replies`, `--max-body-bytes`.
@@ -427,26 +545,38 @@ Comandi: `--doctor`, `--print-config`, `--list-tools`, `--help`, `--version`.
 
 1. `shell_bulk` invece di tanti `shell_exec`: un round-trip invece di N.
 2. `capture: "on_failure"` / `"none"` sugli step di cui non serve l'output.
-3. `file_read` con `match`, un intervallo o `tail_lines`, non il file intero.
-4. `file_edit` con più op invece di una chiamata per modifica.
-5. Output ripulito: ANSI rimossi, spazi di fine riga tolti, righe vuote
-   consecutive compattate.
-6. Troncamento **al centro**, tenendo testa e coda (gli errori stanno in fondo),
-   con nota sui byte omessi.
-7. Sezioni vuote omesse: niente `stderr: (vuoto)`.
-8. `quiet: true` su `shell_exec` quando basta l'exit code.
-9. Letture incrementali dei job via `offset`: i byte già visti non tornano.
-10. Descrizioni dei tool volutamente compatte — stanno nel contesto a ogni richiesta.
+3. `project_info` una volta invece di esplorare il repo a mano.
+4. `search_text` per **trovare** il codice, invece di leggere file per cercarci
+   dentro. `files_only` e `count_only` costano ancora meno.
+5. `code outline` prima di leggere un file che non conosci.
+6. `file_read` con `match`, un intervallo o `tail_lines`, non il file intero.
+7. `file_edit` con più op invece di una chiamata per modifica; `search_text`
+   con `replace` per la stessa modifica su molti file.
+8. `json_tool` per patchare un singolo path invece di rileggere e riscrivere
+   tutto il JSON.
+9. `git diff stat:true` e `git log` compatto invece di patch che non leggerai.
+10. Output ripulito: ANSI rimossi, spazi di fine riga tolti, righe vuote
+    consecutive compattate.
+11. Troncamento **al centro**, tenendo testa e coda (gli errori stanno in fondo),
+    con nota sui byte omessi.
+12. Sezioni vuote omesse: niente `stderr: (vuoto)`.
+13. `quiet: true` su `shell_exec` quando basta l'exit code.
+14. Letture incrementali dei job via `offset`: i byte già visti non tornano.
+15. Un solo tool con `action` copre molte operazioni, invece di un tool per
+    operazione: `git` da solo sostituirebbe 20 tool distinti.
+16. Descrizioni dei tool volutamente compatte — stanno nel contesto a ogni
+    richiesta — e i **profili** per non pagare i gruppi che non usi.
 
 ---
 
 ## Test
 
 ```bash
-npm test              # 150 asserzioni in tutto
-npm run test:smoke    # protocollo stdio, exec, job, bulk, file  (88)
-npm run test:guards   # guardrail: readOnly, allowedRoots, deny* (14)
-npm run test:http     # trasporto HTTP: streamable + legacy SSE   (48)
+npm test              # 316 asserzioni in tutto
+npm run test:smoke    # protocollo stdio, exec, job, bulk, file, profili (97)
+npm run test:guards   # guardrail: readOnly, allowedRoots, deny*        (14)
+npm run test:tools    # i 16 tool estesi: search, git, fs, archive, ...(156)
+npm run test:http     # trasporto HTTP: streamable + legacy SSE         (49)
 ```
 
 I test avviano il server vero e ci parlano in MCP — su stdio per la suite
@@ -462,11 +592,25 @@ di protocollo, non solo la logica interna.
 bin/terminalmcp.js   CLI: argomenti, --doctor, --print-config, avvio
 src/server.js        JSON-RPC 2.0, metodi MCP, sessioni, audit log
 src/http.js          trasporto HTTP: Streamable HTTP + legacy HTTP+SSE
-src/tools.js         definizioni dei 9 tool e dispatch
+src/tools/index.js   registry: gruppi, profili, costo in token
+src/tools/core.js    shell, job, bulk, file read/write/edit
+src/tools/search.js  search_text, search_files
+src/tools/git.js     git
+src/tools/fsops.js   fs_op
+src/tools/archive.js archive
+src/tools/sys.js     sys_info, proc
+src/tools/net.js     http_request, net
+src/tools/dev.js     pkg, project_info, code
+src/tools/data.js    json_tool, diff, encode
+src/tools/watch.js   watch
 src/exec.js          spawn, timeout, kill dell'albero di processi, buffer
 src/jobs.js          registro dei job in background
 src/bulk.js          esecuzione sequenziale con condizioni, retry, variabili
 src/expr.js          mini-linguaggio per `when` e `${...}` (parser dedicato, nessun eval)
+src/diff.js          diff per righe (LCS) e applicazione di patch unificate
+src/glob.js          matching glob e `.gitignore`
+src/walk.js          un solo walker per tutti i tool che scandiscono l'albero
+src/archive.js       ZIP e TAR implementati a mano (Node ha solo zlib)
 src/files.js         file_read / file_write / file_edit / fs_list
 src/shells.js        rilevamento shell e strategia di invocazione per piattaforma
 src/config.js        caricamento config e precedenze
@@ -506,9 +650,8 @@ Note d'implementazione:
 ## Roadmap
 
 Feature già previste per i prossimi passi: step paralleli in `shell_bulk`,
-sessioni di shell persistenti (stato `cd`/`export` conservato), ricerca
-testuale su più file, watch di file, e — se servisse — un token opzionale
-sul trasporto HTTP.
+sessioni di shell persistenti (stato `cd`/`export` conservato), un client
+SQL, e — se servisse — un token opzionale sul trasporto HTTP.
 
 ## Licenza
 

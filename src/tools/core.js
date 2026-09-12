@@ -4,12 +4,12 @@
 // every single request, so every word here is paid for repeatedly.
 
 import process from 'node:process';
-import { runCommand } from './exec.js';
-import { runBulk, renderBulk } from './bulk.js';
-import { fileRead, fileWrite, fileEdit, fsList } from './files.js';
-import { assertCommandAllowed } from './guards.js';
-import { detectAvailable, resolveShell } from './shells.js';
-import { shapeOutput, renderResult, ms } from './format.js';
+import { runCommand } from '../exec.js';
+import { runBulk, renderBulk } from '../bulk.js';
+import { fileRead, fileWrite, fileEdit, fsList } from '../files.js';
+import { assertCommandAllowed } from '../guards.js';
+import { detectAvailable, resolveShell } from '../shells.js';
+import { shapeOutput, renderResult, ms } from '../format.js';
 
 const S = {
   command: { type: 'string', description: 'Command line to run in the shell. Multi-line scripts are supported.' },
@@ -20,7 +20,7 @@ const S = {
   maxOut: { type: 'integer', description: 'Byte cap on returned output before middle-truncation. Lower it to save tokens.' },
 };
 
-export const TOOLS = [
+export const CORE_TOOLS = [
   {
     name: 'shell_exec',
     description:
@@ -279,7 +279,7 @@ export const TOOLS = [
 
 // ------------------------------------------------------------------ handlers
 
-export function createHandlers({ cfg, jobs }) {
+export function createCoreHandlers({ cfg, jobs, server = null }) {
   return {
     async shell_exec(a) {
       requireString(a, 'command');
@@ -437,6 +437,12 @@ export function createHandlers({ cfg, jobs }) {
       ].filter(Boolean);
 
       const live = jobs.list();
+      // Report what the active tool profile costs per request, so trimming it
+      // is an informed decision rather than a guess.
+      const toolLine = server
+        ? `tools: ${server.tools.length} in groups [${server.toolGroups.join(' ')}] ` +
+          `— about ${server.toolTokens} tokens of schema per request`
+        : null;
       return [
         `TerminalMCP on ${process.platform}/${process.arch}, node ${process.version}`,
         `cwd: ${cfg.cwd}`,
@@ -447,7 +453,10 @@ export function createHandlers({ cfg, jobs }) {
         `config file: ${cfg.configPath || '(none — using defaults)'}`,
         `guardrails: ${guards.length ? guards.join(' | ') : 'none (full access)'}`,
         `jobs: ${live.length} tracked, ${live.filter((j) => j.run.running).length} running`,
-      ].join('\n');
+        toolLine,
+      ]
+        .filter(Boolean)
+        .join('\n');
     },
   };
 }

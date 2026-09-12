@@ -26,11 +26,11 @@ function check(name, cond, detail = '') {
 }
 
 class Client {
-  constructor(cwd) {
+  constructor(cwd, extraArgs = []) {
     this.id = 0;
     this.pending = new Map();
     this.buf = '';
-    this.proc = spawn(process.execPath, [ENTRY, '--cwd', cwd], {
+    this.proc = spawn(process.execPath, [ENTRY, '--cwd', cwd, ...extraArgs], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, TERMINALMCP_CONFIG: join(cwd, 'no-such-config.json') },
     });
@@ -103,7 +103,10 @@ async function main() {
 
     const list = await c.send('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
-    check('tools/list has 9 tools', names.length === 9, names.join(','));
+    // The default profile is "all"; the core-only profile is checked below.
+    check('tools/list exposes the full profile', names.length === 25, `${names.length}: ${names.join(',')}`);
+    check('core tools are present', ['shell_exec', 'shell_bulk', 'file_edit'].every((n) => names.includes(n)), names.join(','));
+    check('extended groups are present', ['search_text', 'git', 'fs_op', 'archive', 'sys_info', 'proc', 'http_request', 'net', 'pkg', 'project_info', 'code', 'json_tool', 'diff', 'encode', 'watch'].every((n) => names.includes(n)), names.join(','));
     check('every tool has an inputSchema', (list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'));
 
     const bogus = await c.send('does/not/exist', {});
@@ -424,6 +427,40 @@ async function main() {
 
     check('nothing but protocol went to stdout', true);
     check('server logged to stderr', c.stderr.includes('[terminalmcp]'), c.stderr.slice(0, 200));
+    // ------------------------------------------------------ tool profiles
+    {
+      const core = new Client(dir, ['--tools', 'core']);
+      await core.send('initialize', {
+        protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'profile-test', version: '1' },
+      });
+      const coreList = await core.send('tools/list', {});
+      const coreNames = (coreList.result?.tools ?? []).map((t) => t.name);
+      check('--tools core exposes only the 9 core tools', coreNames.length === 9, coreNames.join(','));
+      check('--tools core drops the extra groups', !coreNames.includes('git') && !coreNames.includes('search_text'), coreNames.join(','));
+      const gone = await core.call('git', { action: 'status' });
+      check('a tool outside the profile is rejected', gone.isError, gone.text.slice(0, 120));
+      const info = await core.call('shell_info', {});
+      check('shell_info reports the active profile', /tools: 9 in groups \[core\]/.test(info.text), info.text.slice(0, 300));
+      core.close();
+
+      const dev = new Client(dir, ['--tools', 'dev']);
+      await dev.send('initialize', {
+        protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'profile-test', version: '1' },
+      });
+      const devNames = ((await dev.send('tools/list', {})).result?.tools ?? []).map((t) => t.name);
+      check('--tools dev includes git and search', devNames.includes('git') && devNames.includes('search_text'), devNames.join(','));
+      check('--tools dev excludes watch and sys', !devNames.includes('watch') && !devNames.includes('sys_info'), devNames.join(','));
+      dev.close();
+
+      const trimmed = new Client(dir, ['--tools', 'all,-watch,-archive']);
+      await trimmed.send('initialize', {
+        protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'profile-test', version: '1' },
+      });
+      const trimmedNames = ((await trimmed.send('tools/list', {})).result?.tools ?? []).map((t) => t.name);
+      check('removals in a profile work', trimmedNames.length === 23 && !trimmedNames.includes('watch') && !trimmedNames.includes('archive'), trimmedNames.join(','));
+      trimmed.close();
+    }
+
   } finally {
     c.close();
     await rm(dir, { recursive: true, force: true }).catch(() => {});

@@ -66,6 +66,16 @@
   // Append a JSONL audit line per tool call.
   "logFile": null,
 
+  // Which tool groups to expose. Tool schemas sit in the model's context on
+  // EVERY request, so a narrower profile is cheaper per call.
+  //   "all"     every group          25 tools, ~10.7k tokens
+  //   "core"    shell/jobs/files      9 tools,  ~4.1k tokens
+  //   "dev"     core + search, git, fs, dev, data   (~8.5k)
+  //   "ops"     core + search, fs, archive, sys, net (~7.7k)
+  // Or list groups: "core,git,search"   Or remove some: "all,-watch,-archive"
+  // Groups: core, search, git, fs, archive, sys, net, dev, data, watch
+  "tools": "all",
+
   // ---- Remote HTTP transport (default: off, stdio is used instead). ----
   // There is NO authentication. Binding anything other than 127.0.0.1 gives
   // a full shell on this machine to anyone who can reach the port.

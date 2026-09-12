@@ -16,7 +16,7 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { SERVER_NAME, SERVER_VERSION, log } from './server.js';
-import { TOOLS } from './tools.js';
+import { stopAllWatchers } from './tools/watch.js';
 
 const SSE_KEEPALIVE_MS = 15000;
 const SESSION_IDLE_MS = 30 * 60 * 1000;
@@ -249,7 +249,8 @@ export function serveHttp(server, options = {}) {
           node: process.version,
           cwd: server.cfg.cwd,
           shell: server.cfg.shell,
-          tools: TOOLS.map((t) => t.name),
+          tools: server.tools.map((t) => t.name),
+          toolGroups: server.toolGroups,
           sessions: sessions.size,
           jobs: { tracked: live.length, running: live.filter((j) => j.run.running).length },
           uptimeSeconds: Math.round(process.uptime()),
@@ -479,7 +480,8 @@ export function serveHttp(server, options = {}) {
     for (const s of sessions.values()) s.closeStreams();
     implicitSession.closeStreams();
     const n = server.jobs.killAll('SIGTERM');
-    if (n) log(`terminated ${n} running job(s)`);
+    const w = stopAllWatchers();
+    if (n || w) log(`terminated ${n} job(s), closed ${w} watcher(s)`);
     httpServer.close(() => process.exit(0));
     // Do not let a lingering keep-alive socket hold the process open.
     setTimeout(() => process.exit(0), 2000).unref();

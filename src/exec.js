@@ -231,3 +231,102 @@ export function startCommand(cfg, opts) {
 export async function runCommand(cfg, opts) {
   return startCommand(cfg, opts).done;
 }
+
+/**
+ * Run a binary directly, with no shell in between.
+ *
+ * This is what the tools that wrap a known program (git, package managers,
+ * `ps`) use: an argv array cannot be mangled by quoting rules, so a commit
+ * message with quotes, spaces and newlines just works, on every platform.
+ */
+export function startArgv(cfg, opts) {
+  const {
+    file,
+    args = [],
+    cwd,
+    env: extraEnv = {},
+    timeoutMs,
+    stdin = null,
+    maxBufferBytes,
+    name = null,
+    keepStdinOpen = false,
+  } = opts;
+
+  if (!file) throw new Error('startArgv needs a "file" to execute');
+  const workDir = resolveCwd(cfg, cwd);
+  const timeout = timeoutMs === undefined || timeoutMs === null ? cfg.timeoutMs : timeoutMs;
+
+  const run = new CommandRun({
+    name,
+    command: `${file} ${args.join(' ')}`.trim(),
+    argv: [file, ...args],
+    cwd: workDir,
+    shellName: '(direct)',
+    shellCommand: file,
+    timeoutMs: timeout,
+    maxBufferBytes: maxBufferBytes ?? cfg.maxBufferBytes,
+    mode: 'argv',
+  });
+
+  run.done = (async () => {
+    try {
+      const child = spawn(file, args, {
+        cwd: workDir,
+        env: { ...process.env, ...cfg.env, ...extraEnv },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: !IS_WIN,
+        windowsHide: true,
+      });
+      run.child = child;
+      run.pid = child.pid;
+
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (d) => run._append('stdout', d));
+      child.stderr.on('data', (d) => run._append('stderr', d));
+      child.stdin.on('error', () => {});
+      if (stdin !== null && stdin !== undefined) child.stdin.write(stdin);
+      if (!keepStdinOpen) child.stdin.end();
+
+      let timer = null;
+      let killTimer = null;
+      if (timeout > 0) {
+        timer = setTimeout(() => {
+          run.timedOut = true;
+          killTree(child, 'SIGTERM');
+          killTimer = setTimeout(() => {
+            if (run.running) killTree(child, 'SIGKILL');
+          }, 3000);
+          killTimer.unref?.();
+        }, timeout);
+      }
+
+      await new Promise((res) => {
+        child.on('error', (err) => {
+          // ENOENT here means the program is not installed; say so plainly.
+          run.error = err.code === 'ENOENT' ? `${file} not found on PATH` : err.message;
+          res();
+        });
+        child.on('close', (code, signal) => {
+          run.exitCode = code;
+          run.signal = signal;
+          res();
+        });
+      });
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+    } catch (err) {
+      run.error = err.message;
+    } finally {
+      if (run.exitCode === undefined) run.exitCode = null;
+      run._settle();
+    }
+    return run;
+  })();
+
+  return run;
+}
+
+export async function runArgv(cfg, opts) {
+  return startArgv(cfg, opts).done;
+}

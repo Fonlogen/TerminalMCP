@@ -11,7 +11,7 @@ import { loadConfig } from '../src/config.js';
 import { Server, serveStdio, SERVER_NAME, SERVER_VERSION, log } from '../src/server.js';
 import { serveHttp } from '../src/http.js';
 import { detectAvailable, resolveShell } from '../src/shells.js';
-import { TOOLS } from '../src/tools.js';
+import { buildToolset, describeGroups, GROUP_NAMES, ALIASES } from '../src/tools/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -61,12 +61,20 @@ Options:
   --read-only            block writes and command execution
   --allowed-root <dir>   restrict file tools to this directory (repeatable)
   --log-file <file>      append a JSONL audit log of tool calls
+  --tools <profile>      which tool groups to expose (default all). Tool schemas cost tokens
+                         on every request, so trim them when you do not need them:
+                           all      everything (25 tools, ~10.7k tokens)
+                           core     shell, jobs, bulk, files only (9 tools, ~4.1k)
+                           dev      core + search, git, fs, dev, data (~8.5k)
+                           ops      core + search, fs, archive, sys, net (~7.7k)
+                         Or a list: --tools core,git,search  /  --tools all,-watch,-archive
+                         Groups: ${GROUP_NAMES.join(', ')}
   -h, --help             this text
   -v, --version          print the version
 
 Env: TERMINALMCP_SHELL, TERMINALMCP_CWD, TERMINALMCP_TIMEOUT_MS, TERMINALMCP_MAX_OUTPUT_BYTES,
      TERMINALMCP_LOGIN, TERMINALMCP_KEEP_ANSI, TERMINALMCP_READ_ONLY, TERMINALMCP_LOG_FILE,
-     TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG,
+     TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG, TERMINALMCP_TOOLS,
      TERMINALMCP_HTTP, TERMINALMCP_HTTP_HOST, TERMINALMCP_HTTP_PORT, TERMINALMCP_HTTP_PATH,
      TERMINALMCP_HTTP_CORS
 `;
@@ -85,6 +93,7 @@ function overridesFrom(args) {
     o.allowedRoots = Array.isArray(args.allowed_root) ? args.allowed_root : [args.allowed_root];
   }
   if (args.max_jobs !== undefined) o.maxJobs = Number(args.max_jobs);
+  if (typeof args.tools === 'string') o.tools = args.tools;
 
   const http = {};
   if (args.http) http.enabled = true;
@@ -174,7 +183,8 @@ function printHttpConfigSnippet(cfg) {
 }
 
 function doctor(cfg) {
-  const active = (() => {
+  const toolset = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } });
+  const shell = (() => {
     try {
       return resolveShell(cfg.shell, cfg.shells);
     } catch (err) {
@@ -189,7 +199,7 @@ function doctor(cfg) {
     `cwd         ${cfg.cwd}`,
     `config      ${cfg.configPath || '(none, using defaults)'}`,
     `shell spec  ${cfg.shell}`,
-    `resolved    ${active.name} -> ${active.command} (mode=${active.mode})`,
+    `resolved    ${shell.name} -> ${shell.command} (mode=${shell.mode})`,
     `shells here ${detectAvailable().map((s) => `${s.name}=${s.command}`).join('\n            ') || '(none detected!)'}`,
     `timeout     ${cfg.timeoutMs}ms`,
     `max output  ${cfg.maxOutputBytes} bytes`,
@@ -197,7 +207,13 @@ function doctor(cfg) {
     `read-only   ${cfg.readOnly}`,
     `allowedRoots ${cfg.allowedRoots.length ? cfg.allowedRoots.join(', ') : '(unrestricted)'}`,
     `denyCommands ${cfg.denyCommands.length || 0} pattern(s)`,
-    `tools       ${TOOLS.length}: ${TOOLS.map((t) => t.name).join(', ')}`,
+    `profile     ${cfg.tools} -> ${toolset.groups.join(', ')}`,
+    `tools       ${toolset.tools.length} tools, ~${toolset.estimatedTokens} tokens of schema per request`,
+    ...describeGroups(toolset.groups).map(
+      (g) =>
+        `  ${g.active ? '[x]' : '[ ]'} ${g.name.padEnd(8)} ~${String(g.estimatedTokens).padStart(5)} tok  ` +
+        `${g.toolNames.join(', ')}`,
+    ),
     `transport   ${
       cfg.http.enabled
         ? `http on ${cfg.http.host}:${cfg.http.port}${cfg.http.path} (no auth)`
@@ -231,16 +247,28 @@ function main() {
   if (args.print_config) { printConfigSnippet(cfg); return; }
   if (args.doctor) { doctor(cfg); return; }
   if (args.list_tools) {
-    process.stdout.write(
-      TOOLS.map((t) => `${t.name}\n  ${t.description}`).join('\n\n') + '\n',
-    );
+    const set = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } });
+    const lines = [
+      `profile "${cfg.tools}" -> ${set.tools.length} tools, ~${set.estimatedTokens} tokens of schema`,
+      '',
+      `groups (bundles: ${Object.keys(ALIASES).join(', ')})`,
+      ...describeGroups(set.groups).map(
+        (g) =>
+          `  ${g.active ? '[x]' : '[ ]'} ${g.name.padEnd(8)} ~${String(g.estimatedTokens).padStart(5)} tok  ` +
+          `${g.label}`,
+      ),
+      '',
+      ...set.tools.map((t) => `${t.name}\n  ${t.description}`),
+    ];
+    process.stdout.write(`${lines.join('\n')}\n`);
     return;
   }
 
   const server = new Server(cfg);
   log(
     `v${SERVER_VERSION} ready — shell=${cfg.shell} cwd=${cfg.cwd} ` +
-    `tools=${TOOLS.length}${cfg.readOnly ? ' [READ-ONLY]' : ''}`,
+    `tools=${server.tools.length} (${server.toolGroups.join(',')}, ~${server.toolTokens} tok)` +
+    `${cfg.readOnly ? ' [READ-ONLY]' : ''}`,
   );
 
   if (cfg.http.enabled) serveHttp(server, cfg.http);

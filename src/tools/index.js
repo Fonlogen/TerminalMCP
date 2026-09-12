@@ -1,0 +1,147 @@
+// Tool registry and profiles.
+//
+// Every tool definition sits in the model's context on EVERY request, so the
+// full set is not always the right set. Groups can be switched on and off with
+// --tools / config.tools, and `shell_info` reports what the current profile
+// costs so the trade-off is visible rather than guessed at.
+
+import { CORE_TOOLS, createCoreHandlers } from './core.js';
+import * as search from './search.js';
+import * as git from './git.js';
+import * as fsops from './fsops.js';
+import * as archive from './archive.js';
+import * as sys from './sys.js';
+import * as net from './net.js';
+import * as dev from './dev.js';
+import * as data from './data.js';
+import * as watch from './watch.js';
+
+/** Group modules export TOOLS + createHandlers; normalise that shape here. */
+function group(label, mod) {
+  if (!Array.isArray(mod.TOOLS)) throw new Error(`Tool group "${label}" does not export TOOLS`);
+  if (typeof mod.createHandlers !== 'function') {
+    throw new Error(`Tool group "${label}" does not export createHandlers`);
+  }
+  return { label, tools: mod.TOOLS, createHandlers: mod.createHandlers };
+}
+
+/** Group order here is the order tools appear in tools/list. */
+export const GROUPS = {
+  core: {
+    label: 'shell, jobs, bulk, file read/write/edit',
+    tools: CORE_TOOLS,
+    createHandlers: createCoreHandlers,
+    always: true,
+  },
+  search: group('grep a tree, find files, project-wide replace', search),
+  git: group('git status/log/diff/branch/commit and raw passthrough', git),
+  fs: group('copy, move, delete, stat, hash, chmod, tree, disk usage', fsops),
+  archive: group('zip / tar / gzip create, list and extract', archive),
+  sys: group('machine facts and process control', sys),
+  net: group('HTTP client, DNS, port checks, interfaces', net),
+  dev: group('package managers, project detection, code outline', dev),
+  data: group('JSON query/patch, diff/patch, encode/hash', data),
+  watch: group('watch paths for changes', watch),
+};
+
+export const GROUP_NAMES = Object.keys(GROUPS);
+
+/** Named bundles, so nobody has to remember the group list. */
+export const ALIASES = {
+  all: GROUP_NAMES,
+  minimal: ['core'],
+  // What a coding agent reaches for constantly.
+  dev: ['core', 'search', 'git', 'dev', 'data', 'fs'],
+  // Driving a machine rather than writing code.
+  ops: ['core', 'search', 'fs', 'sys', 'net', 'archive'],
+};
+
+export const DEFAULT_PROFILE = 'all';
+
+/**
+ * Resolve a profile spec into a group list.
+ *
+ * Accepts a comma/space separated list of group names and aliases, with
+ * `-name` removing one:  "all", "dev", "core,git,sys", "all,-watch,-archive".
+ * `core` is always present — without it there is no server.
+ */
+export function resolveGroups(spec) {
+  const raw = spec === undefined || spec === null || spec === '' ? DEFAULT_PROFILE : spec;
+  const tokens = (Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/))
+    .map((t) => String(t).trim())
+    .filter(Boolean);
+
+  const selected = new Set();
+  const removed = new Set();
+  const unknown = [];
+
+  for (const token of tokens) {
+    const negate = token.startsWith('-') || token.startsWith('!');
+    const name = (negate ? token.slice(1) : token).toLowerCase();
+
+    const expand = ALIASES[name] ?? (GROUPS[name] ? [name] : null);
+    if (!expand) { unknown.push(name); continue; }
+    for (const g of expand) {
+      if (negate) removed.add(g);
+      else selected.add(g);
+    }
+  }
+
+  if (unknown.length) {
+    throw new Error(
+      `Unknown tool group(s): ${unknown.join(', ')}. ` +
+      `Groups: ${GROUP_NAMES.join(', ')}. Bundles: ${Object.keys(ALIASES).join(', ')}.`,
+    );
+  }
+
+  // A spec of only removals means "everything except these".
+  if (!selected.size && removed.size) for (const g of GROUP_NAMES) selected.add(g);
+
+  for (const g of removed) selected.delete(g);
+  for (const g of GROUP_NAMES) if (GROUPS[g].always) selected.add(g);
+
+  return GROUP_NAMES.filter((g) => selected.has(g));
+}
+
+/**
+ * Build the active toolset.
+ * Returns { groups, tools, handlers, bytes, estimatedTokens }.
+ */
+export function buildToolset(spec, ctx) {
+  const groups = resolveGroups(spec);
+  const tools = [];
+  let handlers = {};
+
+  for (const name of groups) {
+    const group = GROUPS[name];
+    tools.push(...group.tools);
+    if (group.createHandlers) handlers = { ...handlers, ...group.createHandlers(ctx) };
+  }
+
+  const bytes = JSON.stringify({ tools }).length;
+  return {
+    groups,
+    tools,
+    handlers,
+    bytes,
+    // Rough but consistent: JSON schema text runs ~3.6 bytes per token.
+    estimatedTokens: Math.round(bytes / 3.6),
+  };
+}
+
+/** One line per group, for --list-tools and shell_info. */
+export function describeGroups(activeGroups = []) {
+  const active = new Set(activeGroups);
+  return GROUP_NAMES.map((name) => {
+    const g = GROUPS[name];
+    const bytes = JSON.stringify({ tools: g.tools }).length;
+    return {
+      name,
+      label: g.label,
+      active: active.has(name),
+      always: Boolean(g.always),
+      toolNames: g.tools.map((t) => t.name),
+      estimatedTokens: Math.round(bytes / 3.6),
+    };
+  });
+}

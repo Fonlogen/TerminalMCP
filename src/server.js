@@ -5,7 +5,8 @@
 
 import process from 'node:process';
 import { appendFile } from 'node:fs/promises';
-import { TOOLS, createHandlers } from './tools.js';
+import { buildToolset } from './tools/index.js';
+import { stopAllWatchers } from './tools/watch.js';
 import { JobManager } from './jobs.js';
 import { PolicyError } from './guards.js';
 
@@ -35,7 +36,13 @@ export class Server {
   constructor(cfg) {
     this.cfg = cfg;
     this.jobs = new JobManager(cfg);
-    this.handlers = createHandlers({ cfg, jobs: this.jobs });
+    // The active toolset depends on cfg.tools, so it is built per server
+    // rather than being a module-level constant.
+    const toolset = buildToolset(cfg.tools, { cfg, jobs: this.jobs, server: this });
+    this.tools = toolset.tools;
+    this.handlers = toolset.handlers;
+    this.toolGroups = toolset.groups;
+    this.toolTokens = toolset.estimatedTokens;
     this.initialized = false;
     this.clientInfo = null;
     this.protocolVersion = LATEST_PROTOCOL;
@@ -85,8 +92,9 @@ export class Server {
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
             instructions:
-              'Full terminal control. Batch work through shell_bulk instead of many shell_exec calls, ' +
-              'read files with line ranges or match=, and patch them with file_edit.',
+              'Full terminal and system control. Batch work through shell_bulk instead of many ' +
+              'shell_exec calls; locate code with search_text instead of reading whole files; ' +
+              'patch files with file_edit; call project_info once to orient in an unfamiliar repo.',
           });
         }
 
@@ -99,7 +107,7 @@ export class Server {
           return result(id, {});
 
         case 'tools/list':
-          return result(id, { tools: TOOLS });
+          return result(id, { tools: this.tools });
 
         // Declared capabilities do not include these, but some clients probe
         // anyway; empty lists are friendlier than a method-not-found error.
@@ -138,7 +146,7 @@ export class Server {
       return errorResponse(
         id,
         ERR.invalidParams,
-        `Unknown tool "${name}". Available: ${TOOLS.map((t) => t.name).join(', ')}`,
+        `Unknown tool "${name}". Available: ${this.tools.map((t) => t.name).join(', ')}`,
       );
     }
 
@@ -217,7 +225,8 @@ export function serveStdio(server, { input = process.stdin, output = process.std
 
   const shutdown = (why) => {
     const n = server.jobs.killAll('SIGTERM');
-    if (n) log(`${why}: terminated ${n} running job(s)`);
+    const w = stopAllWatchers();
+    if (n || w) log(`${why}: terminated ${n} job(s), closed ${w} watcher(s)`);
     process.exit(0);
   };
 

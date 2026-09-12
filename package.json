@@ -12,14 +12,16 @@
   },
   "scripts": {
     "start": "node bin/terminalmcp.js",
-    "test": "node test/smoke.mjs && node test/guards.mjs && node test/http.mjs",
+    "test": "node test/smoke.mjs && node test/guards.mjs && node test/tools.mjs && node test/http.mjs",
     "print-config": "node bin/terminalmcp.js --print-config",
     "test:smoke": "node test/smoke.mjs",
     "test:guards": "node test/guards.mjs",
     "doctor": "node bin/terminalmcp.js --doctor",
     "install-skill": "node scripts/install-skill.mjs",
     "test:http": "node test/http.mjs",
-    "start:http": "node bin/terminalmcp.js --http"
+    "start:http": "node bin/terminalmcp.js --http",
+    "test:tools": "node test/tools.mjs",
+    "list-tools": "node bin/terminalmcp.js --list-tools"
   },
   "files": [
     "bin",

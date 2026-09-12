@@ -147,7 +147,8 @@ async function main() {
     let r = await req('GET', '/health');
     check('GET /health returns ok', r.status === 200 && r.json?.status === 'ok', r.text.slice(0, 200));
     check('/health names the server', r.json?.name === 'terminalmcp', r.text.slice(0, 200));
-    check('/health lists the 9 tools', r.json?.tools?.length === 9, JSON.stringify(r.json?.tools));
+    check('/health lists the full toolset', r.json?.tools?.length === 25, JSON.stringify(r.json?.tools));
+    check('/health reports the tool groups', Array.isArray(r.json?.toolGroups) && r.json.toolGroups.includes('core'), JSON.stringify(r.json?.toolGroups));
     r = await req('GET', '/');
     check('GET / also serves info', r.status === 200 && r.json?.status === 'ok', String(r.status));
 
@@ -171,7 +172,7 @@ async function main() {
 
     // ------------------------------------------------------------ tools/list
     r = await req('POST', '/mcp', { headers: S, body: rpc(2, 'tools/list', {}) });
-    check('tools/list over HTTP works', r.json?.result?.tools?.length === 9, r.text.slice(0, 150));
+    check('tools/list over HTTP works', r.json?.result?.tools?.length === 25, r.text.slice(0, 150));
 
     // ------------------------------------------------------------ tools/call
     r = await req('POST', '/mcp', {

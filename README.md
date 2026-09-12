@@ -5,13 +5,14 @@
 ### Give your AI agent a real terminal — and stop paying for it in tokens.
 
 A zero-dependency MCP server that hands an AI complete control of a machine —
-shell, filesystem, git, package managers, processes, network — and is built so
-that the whole thing costs a fraction of the tokens a naive tool server burns.
+shell, filesystem, git, package managers, processes, network, a real browser and
+the screen itself — and is built so that the whole thing costs a fraction of the
+tokens a naive tool server burns.
 
 [![CI](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2018-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success)](package.json)
-[![Tests](https://img.shields.io/badge/tests-383%20assertions-success)](test)
+[![Tests](https://img.shields.io/badge/tests-595%20assertions-success)](test)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-635BFF)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -52,9 +53,10 @@ constraint the whole design answers:
 | Change 3 lines of a 2,000-line file | rewrite the file | **`file_edit`** patches 3 lines |
 | Understand an unfamiliar repo | a dozen `ls` + `cat` | **1** (`project_info`) |
 | Reuse a value from an earlier step | re-send it every time | **`${vars.name}`**, kept server-side |
+| Find the button on a web page | read the page's HTML | **`browser snapshot`** lists what you can click |
 | Tools you don't need this session | pay for them anyway | **`--tools` profiles** |
 
-Everything else — 26 tools, two transports, cross-platform shells — exists so
+Everything else — 28 tools, two transports, cross-platform shells — exists so
 the agent never has to fall back to an expensive pattern to get something done.
 
 ---
@@ -188,9 +190,42 @@ shell_exec { command: "docker build -t app:${vars.sha} ." }
 everywhere `${vars.…}` works but is never echoed back — not in listings, not in
 results, not in the audit log.
 
+**Testing the web app it just changed.** It drives a real browser over the
+DevTools Protocol — the same protocol Playwright is built on, with no driver to
+install and no browser to download — and reads a page as a short list of things
+it can act on rather than as HTML:
+
+```
+browser { action: "launch", url: "localhost:3000" }
+browser { action: "snapshot" }
+    e4   email     "Email"  name=user  placeholder="you@example.com"
+    e5   password  "Password"  name=pass
+    e8   button    "Sign in"
+browser { action: "fill", ref: "e4", text: "ada@example.com" }
+browser { action: "fill", ref: "e5", text: "hunter2", press_enter: true }
+browser { action: "screenshot" }              it can see the result
+browser { action: "console", level: "error" } and read what the page complained about
+```
+
+Or `attach` to the browser already open on the desktop — its profile, its
+extensions, its logged-in sessions. No extension to install: start Chrome once
+with `--remote-debugging-port=9222` and the agent can drive the session you are
+already signed into.
+
+**Seeing what is on the screen.** Desktop capture, for everything that is not a
+web page — a native app, an installer, a chart in a viewer — plus `view`, which
+turns any image already on disk into something the model can actually look at:
+
+```
+screen { action: "shot" }                                    the whole desktop
+screen { action: "shot", mode: "window", window: "Figma" }   one window
+screen { action: "shot", mode: "region", x: 0, y: 0, width: 900, height: 240 }
+screen { action: "view", path: "designs/mockup.png" }
+```
+
 ---
 
-## The three ideas that make it different
+## The four ideas that make it different
 
 ### 1. Batching — `shell_bulk`
 
@@ -268,13 +303,15 @@ carry. Measured on this repo:
 | `core` | 10 | ~4,800 |
 | `ops` | 18 | ~8,500 |
 | `dev` | 20 | ~9,200 |
-| `all` (default) | 26 | ~11,500 |
+| `web` | 17 | ~9,800 |
+| `all` (default) | 28 | ~13,900 |
 
 ```bash
 node bin/terminalmcp.js --tools core             # shell, jobs, bulk, files, vars
 node bin/terminalmcp.js --tools dev              # + search, git, fs, dev, data
+node bin/terminalmcp.js --tools web              # + browser, screen, net, search
 node bin/terminalmcp.js --tools core,git,search  # pick groups
-node bin/terminalmcp.js --tools all,-watch       # everything except one
+node bin/terminalmcp.js --tools all,-browser     # everything except one
 ```
 
 `core` and `vars` are always included. `--list-tools` and `--doctor` print the
@@ -282,12 +319,53 @@ cost of every group, and `shell_info` reports it to the model at runtime — so
 trimming is an informed decision rather than a guess. Nothing is ever lost:
 whatever isn't exposed as a tool is still reachable through `shell_exec`.
 
+### 4. Reading a web page without reading its HTML
+
+Handing a model 400KB of markup to find a login button is the browser
+equivalent of `cat`-ing a whole file to find one function. So the primary way
+to read a page is `snapshot`: every element you can actually act on, named the
+way a person would name it, each with a short ref.
+
+```
+browser { action: "snapshot" }
+
+https://example.com/login  —  Example — Sign in
+
+e1   h1         "Sign in to Example"
+e2   link       "Forgot your password?"  -> /reset
+e3   email      "Email"  name=user  placeholder="you@example.com"  required
+e4   password   "Password"  name=pass
+e5   select     "Free Pro"  name=plan  options=["free","pro"]
+e6   checkbox   "Remember me"  name=remember  unchecked
+e7   button     "Sign in"
+```
+
+Then `click { ref: "e7" }`. A few hundred tokens for a page instead of tens of
+thousands — and it survives a redesign of the markup, which a hand-written CSS
+selector does not. Refs live in the page itself, so navigating away invalidates
+them and a stale ref says so rather than quietly clicking the wrong thing.
+
+`html` is still there for when you genuinely need the markup, with
+`clean: true` to drop scripts, styles and comments first.
+
+The same logic applies to images. A vision model is billed by area — roughly
+`width × height / 750` tokens — so a raw 4K screenshot is about 11,000 tokens
+and the same screenshot at 1200px wide is about 1,100 and just as readable.
+Every capture is therefore scaled to `max_width` (1200 by default) before it is
+returned, and the reply tells you what that cost:
+
+```
+viewport of http://localhost:3000/
+saved .terminalmcp/shots/2026-04-11_18-22-03.png (184320 bytes, 1280x800)
+1280x800 scaled to 1200x750, ~1200 image tokens
+```
+
 ---
 
 ## Tool reference
 
-26 tools in 11 groups. Most use an `action` parameter rather than one tool per
-verb — `git` alone would otherwise be twenty tools.
+28 tools in 13 groups. Most use an `action` parameter rather than one tool per
+verb — `git` alone would otherwise be twenty tools, and `browser` thirty.
 
 ### `core` — always on
 
@@ -377,6 +455,42 @@ containing quotes, newlines or `$` needs no escaping.
 | Tool | Purpose |
 | --- | --- |
 | `watch` | `start` returns a `watch_id`; `poll` blocks up to `wait_ms` for changes (one call instead of a polling loop); `list`, `stop`. Events are coalesced per path, so one save reads as one change. |
+
+### `browser`
+
+One tool, thirty actions, driving Chrome / Chromium / Edge / Brave over the
+DevTools Protocol.
+
+| Group | Actions |
+| --- | --- |
+| Lifecycle | `launch` (headless or windowed), `attach` to a browser started with `--remote-debugging-port`, `status`, `close` |
+| Tabs | `tabs`, `tab_new`, `tab_select`, `tab_close` |
+| Navigation | `navigate`, `back`, `forward`, `reload`, `resize` |
+| Reading | `snapshot` (the cheap element map), `html` (with `clean`), `text`, `eval` |
+| Interaction | `click`, `type`, `fill`, `press`, `hover`, `scroll`, `select` |
+| Waiting | `wait` for a selector, text, its disappearance, a lifecycle state, network idle, or just a delay |
+| Capture | `screenshot` (viewport, `full_page`, or one element — returned inline so the model can see it), `pdf` |
+| State | `cookies`, `cookie_set`, `cookies_clear` |
+| Diagnostics | `console` (filterable by level), `network` (filterable by URL, or `failed: true` for just the problems) |
+
+Every element target accepts one of three things: `ref` from the last snapshot
+(cheapest and sturdiest), `selector` for a CSS selector, or `text` to find an
+element by what it says. Ambiguous text prefers the thing you can act on and
+the innermost match, so `text: "Sign in"` picks the button rather than the
+heading above it that says the same words.
+
+Browsers are found automatically: the usual install locations per platform,
+then `$CHROME_PATH`, then a Playwright or Puppeteer cache if you already have
+one on disk. Nothing is downloaded.
+
+### `screen`
+
+| Tool | Purpose |
+| --- | --- |
+| `screen` | `shot` captures the whole desktop, one monitor (`mode: "display"`), one window matched on its title (`mode: "window"`), or an exact rectangle (`mode: "region"`). `view` shows any image file on disk — png, jpeg, gif, webp — so the model can look at a screenshot from ten minutes ago or a mockup someone dropped in a folder. `displays` and `windows` list what there is to capture. |
+
+Captures are saved at full resolution and shown scaled to `max_width`, so the
+file on disk stays the good copy while the reply stays cheap.
 
 ---
 
@@ -503,6 +617,16 @@ multi-line scripts and quoting behave the way you expect.
 | `varsFile` | `null` | Mirror the variable store to this file so it survives a restart. |
 | `persistSecrets` | `false` | Also write `secret` variables to that file. |
 | `maxVars` / `maxVarBytes` / `maxVarsTotalBytes` | `200` / `1MB` / `8MB` | Variable store limits. |
+| `browser.executable` | `null` | Path to a Chromium-family binary. `null` = auto-detect. |
+| `browser.headless` | `true` | `false` opens a real window, which is what you want when a human is watching. |
+| `browser.userDataDir` | `null` | Profile directory, so logins survive between runs. `null` = a throwaway temp profile. |
+| `browser.viewport` | `1280x800` | Window and viewport size for browsers we launch. |
+| `browser.dialogs` | `"accept"` | What to do with `alert()` / `confirm()`. An unanswered dialog freezes the page, so one of them has to happen. |
+| `browser.downloadDir` | `null` | Where the browser puts downloads, so the file tools can find them. `null` = `<cwd>/.terminalmcp/downloads`. |
+| `browser.args` | `[]` | Extra browser command-line flags. |
+| `screenshots.dir` | `null` | Where captures are saved. `null` = `<cwd>/.terminalmcp/shots`. |
+| `screenshots.maxWidth` | `1200` | Scale images to this width before returning them. The real token dial. |
+| `screenshots.maxImageBytes` | `5242880` | Refuse to return an image larger than this. |
 
 ### Command-line options
 
@@ -513,6 +637,9 @@ node bin/terminalmcp.js --help
 `--cwd`, `--shell`, `--config`, `--timeout-ms`, `--max-output-bytes`,
 `--login`, `--tools`, `--vars-file`, `--persist-secrets`, `--max-vars`,
 `--max-var-bytes`, `--read-only`, `--allowed-root`, `--log-file`.
+
+Browser and screen: `--browser-path`, `--no-headless`, `--shots-dir`,
+`--max-image-width`.
 
 HTTP: `--http`, `--host`, `--port`, `--path`, `--no-cors`, `--strict-sessions`,
 `--sse-replies`, `--max-body-bytes`.
@@ -525,8 +652,9 @@ Commands: `--doctor`, `--print-config`, `--list-tools`, `--help`, `--version`.
 `TERMINALMCP_MAX_OUTPUT_BYTES`, `TERMINALMCP_LOGIN`, `TERMINALMCP_KEEP_ANSI`,
 `TERMINALMCP_READ_ONLY`, `TERMINALMCP_LOG_FILE`, `TERMINALMCP_ALLOWED_ROOTS`,
 `TERMINALMCP_CONFIG`, `TERMINALMCP_TOOLS`, `TERMINALMCP_VARS_FILE`,
-`TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`, `TERMINALMCP_HTTP_PORT`,
-`TERMINALMCP_HTTP_PATH`, `TERMINALMCP_HTTP_CORS`.
+`TERMINALMCP_BROWSER_PATH`, `TERMINALMCP_BROWSER_HEADLESS`,
+`TERMINALMCP_SHOTS_DIR`, `TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`,
+`TERMINALMCP_HTTP_PORT`, `TERMINALMCP_HTTP_PATH`, `TERMINALMCP_HTTP_CORS`.
 
 ---
 
@@ -553,6 +681,31 @@ measures that change a lot:
   localhost.
 - On an untrusted network, put a reverse proxy (Caddy, nginx) in front with TLS
   and Basic Auth. The server neither knows nor cares.
+
+### The browser and the screen deserve their own thought
+
+Two of the newer capabilities reach further than a shell does, and it is worth
+knowing exactly how far.
+
+- **`browser attach` inherits a real session.** Attaching to a browser you
+  started with `--remote-debugging-port` gives the agent that browser's
+  profile: your cookies, your logged-in accounts, your extensions. It can act
+  as you on every site you are signed into. That is precisely why the feature
+  is useful, and precisely why `attach` should be a decision you make rather
+  than a default. `launch` is the safer sibling — a throwaway profile that is
+  signed into nothing.
+- **A screenshot captures whatever is on the screen**, including windows that
+  have nothing to do with the task: a password manager, somebody else's chat, a
+  medical record. `mode: "region"` and `mode: "window"` exist so a capture can
+  be narrow on purpose.
+- `readOnly` blocks `browser launch` (it starts a process) and blocks writing
+  captures to disk, but it cannot police what a page does once it is open.
+- macOS will ask for permission the first time: Screen Recording for captures,
+  Accessibility for listing windows. Nothing can be captured until you grant
+  it, and the error says so rather than returning a black image.
+- The `screen` tool needs a desktop. On a server, in a container or over plain
+  SSH there is nothing to capture, and it says so — browser screenshots still
+  work there, because they render headlessly.
 
 ### Optional guardrails
 
@@ -597,6 +750,11 @@ src/glob.js               glob matching and .gitignore semantics
 src/walk.js               one directory walker, shared by every crawling tool
 src/archive.js            ZIP and TAR, written by hand
 src/files.js              file_read / file_write / file_edit / fs_list
+src/ws.js                 a WebSocket client, written by hand (RFC 6455)
+src/cdp.js                Chrome DevTools Protocol: discovery, launch, sessions
+src/browser.js            page operations: snapshot, input, capture, network
+src/image.js              PNG decode / resize / encode, and image token maths
+src/screen.js             desktop capture per platform, display and window lists
 src/shells.js             shell detection and per-platform invocation
 src/config.js             configuration loading and precedence
 src/guards.js             optional guardrails
@@ -607,7 +765,7 @@ src/tools/*.js            one module per tool group
 skills/terminalmcp/       the skill that teaches a model to use it well
 ```
 
-Roughly 9,300 lines of source, 1,900 lines of tests, zero dependencies.
+Roughly 13,500 lines of source, 3,000 lines of tests, zero dependencies.
 
 ### Implementation notes
 
@@ -625,6 +783,17 @@ Roughly 9,300 lines of source, 1,900 lines of tests, zero dependencies.
   when the client won't take JSON, or on demand via `--sse-replies`.
 - **`when` and `${...}` use a dedicated parser.** No `eval`, no reachable
   arbitrary functions.
+- **The browser is driven over a hand-written WebSocket client.** Node 22 has a
+  global `WebSocket`, Node 18 does not, and adding `ws` for one transport would
+  have ended the zero-dependency promise. RFC 6455 is a handshake plus a frame
+  header; the fiddly part is that a full-page screenshot arrives as one
+  multi-megabyte message, so frames are read from a chunk queue rather than by
+  re-concatenating a growing buffer.
+- **PNG is decoded, resized and re-encoded in process.** Shelling out to
+  ImageMagick would mean the feature silently degrades on machines that do not
+  have it — which is most Windows machines. The encoder picks a row filter per
+  row and drops the alpha channel when nothing is transparent, which takes a
+  flat UI screenshot from 1.4MB of raw pixels to a couple of kilobytes.
 - **Atomic where it matters.** `file_edit` is all-or-nothing; `diff apply`
   refuses a partial patch rather than leaving a half-edited file; the variable
   store persists via write-then-rename.
@@ -647,11 +816,14 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 383 assertions
+npm test                 # 595 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (97)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
+npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
+npm run test:screen      # the screen tool: view, guards, honest failure     (30)
+npm run test:browser     # a real browser: 30 actions end to end            (114)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```
 
@@ -661,6 +833,19 @@ transport suite. So they cover the handshake, JSON-RPC framing and protocol
 negotiation, not just internal logic. Fixtures include a synthetic repository
 and a local HTTP server, so `git`, `pkg`, `search_text` and `http_request` are
 exercised against something real.
+
+The browser suite is the same kind of thing rather than a mock: it serves
+fixture pages over HTTP, launches an actual Chromium, and drives a login form
+through snapshot, fill, select, click and submit, checking that the page
+received the values. Two parts degrade honestly instead of pretending:
+
+- **No browser installed** — the browser suite reports that and exits 0. A
+  missing browser is a missing browser, not a broken server.
+- **No desktop** — desktop capture cannot be exercised on a headless machine,
+  so what is testable there is tested: the PNG codec, the token maths, and the
+  decision table that picks a capture back end (which tool for X11 versus
+  Wayland, which ones cannot target a window, what to suggest installing).
+  The capture commands themselves are only exercised where there is a screen.
 
 ---
 
@@ -673,6 +858,16 @@ exercised against something real.
 | **macOS** | Supported; shares the POSIX code paths with Linux |
 | **Windows** | Supported and tested — Git Bash, `cmd`, PowerShell 5, `pwsh` 7, WSL, `taskkill` process trees, CIM process listing, PowerShell disk queries |
 | **MCP protocol** | 2024-11-05, 2025-03-26, 2025-06-18 (negotiated per session) |
+| **Browser control** | Chrome, Chromium, Edge, Brave, Vivaldi — anything Chromium-family, on all three platforms. Not Firefox: it dropped most of its CDP surface in favour of WebDriver BiDi, which is a different protocol. |
+| **Desktop capture** | Windows: PowerShell + System.Drawing, nothing to install. macOS: `screencapture`, built in. Linux: whichever of `grim` (Wayland), `maim`, `import`, `scrot`, `spectacle`, `gnome-screenshot` is present — `--doctor` says which it found and what to install if none. |
+
+The browser paths are tested on Linux against a real Chromium, and the Windows
+and macOS browser paths use the same protocol code — only the search for the
+binary differs per platform. Desktop capture is the one part where the
+per-platform commands differ substantially: the Linux back-end selection is
+covered by tests, the PowerShell and `screencapture` invocations are not yet
+exercised on a machine with a screen. If one misbehaves, please open an issue —
+`--doctor` output is the useful thing to paste.
 
 ---
 
@@ -688,6 +883,21 @@ exercised against something real.
   `respect_gitignore: false` when you're looking for something in build output.
 - `code outline` is pattern-based, not a real parser. It's for orientation;
   `file_read` is the source of truth.
+- **Browser refs are invalidated by navigation**, deliberately: they live in
+  the page as `window.__tmcpRefs`, so a reload or a new URL makes them stale and
+  using one then says exactly that. Call `snapshot` again.
+- **JavaScript dialogs are answered automatically** (`accept` by default), else
+  the page would sit frozen forever waiting for a click nobody can make. The
+  message is kept and reported, since an unexplained `alert()` is usually the
+  reason something appeared not to work.
+- **Only a browser this server launched is ever closed by it.** `close` on a
+  browser you attached to disconnects and leaves it running; killing the
+  browser a person is using would be unforgivable.
+- Screenshots and downloads land under `.terminalmcp/` in the working
+  directory. Worth adding to `.gitignore` — this repo already does.
+- A JPEG screenshot is scaled by the renderer rather than afterwards, because
+  this server can resize PNG but not JPEG. That also means the saved JPEG is
+  the scaled one, while a saved PNG is full resolution.
 
 ---
 
@@ -695,6 +905,8 @@ exercised against something real.
 
 - Parallel step groups in `shell_bulk`
 - Persistent shell sessions (keeping `cd` / `export` state)
+- Mouse and keyboard control of the desktop, not just capture of it
+- Firefox via WebDriver BiDi, alongside CDP
 - A SQL client
 - An optional token for the HTTP transport
 

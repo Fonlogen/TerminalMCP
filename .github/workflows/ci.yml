@@ -49,5 +49,22 @@ jobs:
       - name: Environment report
         run: node bin/terminalmcp.js --doctor
 
+      # The browser suite drives a real Chromium. GitHub's runners ship Chrome,
+      # and the suite skips itself cleanly when no browser is present, so this
+      # is a convenience rather than a requirement.
+      - name: Report which browser was found
+        shell: bash
+        run: |
+          node -e '
+            import("./src/cdp.js").then(({ findBrowser }) => {
+              try {
+                const b = findBrowser(null);
+                console.log("browser: " + b.path + " (" + b.kind + ", via " + b.source + ")");
+              } catch (err) {
+                console.log("no browser found; test:browser will skip");
+              }
+            });
+          '
+
       - name: Test suite
         run: npm test

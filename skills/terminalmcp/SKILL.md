@@ -1,13 +1,13 @@
 ---
 name: terminalmcp
-description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, read or write files surgically, and keep values in server-side variables so they need not be re-sent. Use whenever tools like shell_exec, shell_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool, vars or archive are available, and especially before running several commands in a row, before reading a whole file, or when orienting yourself in an unfamiliar repository.
+description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, read or write files surgically, keep values in server-side variables so they need not be re-sent, drive a real browser, and screenshot the screen or a window so you can see it. Use whenever tools like shell_exec, shell_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool, vars, browser, screen or archive are available, and especially before running several commands in a row, before reading a whole file, before reading a web page's HTML, or when orienting yourself in an unfamiliar repository.
 ---
 
 # TerminalMCP
 
-Full terminal, filesystem and system control over MCP. Up to 26 tools in
-eleven groups, built so a whole task fits in as few calls — and as few tokens —
-as possible.
+Full terminal, filesystem, browser and system control over MCP. Up to 28 tools
+in thirteen groups, built so a whole task fits in as few calls — and as few
+tokens — as possible.
 
 Not every group is always enabled. Call `shell_info` once if you need to know
 what you have; it reports the active profile. Anything not exposed as a tool is
@@ -57,6 +57,9 @@ GOOD: shell_bulk { steps: [
 | React to files changing | `watch` |
 | base64, hashes, JWTs, timestamps | `encode` |
 | Keep a value for later without re-sending it | `vars`, or `assign` on shell_exec / http_request / bulk |
+| Load a web page and act on it | `browser` |
+| See what a page looks like, or what is on screen | `browser` action `screenshot`, `screen` action `shot` |
+| Look at an image file | `screen` action `view` |
 | Which OS / shell / profile am I on | `shell_info` |
 
 ## shell_bulk — the workhorse
@@ -361,6 +364,140 @@ The store is shared across sessions and lives as long as the server process
 (or longer, if the operator configured `varsFile`). `shell_info` reports how
 many variables are set.
 
+## The browser
+
+`browser` drives a real Chromium (Chrome, Chromium, Edge, Brave). Start with
+`launch`, or with `attach` if the user has a browser open on
+`--remote-debugging-port` — attaching gives you their profile and their logged-in
+sessions, so prefer it when the task needs an account you cannot sign into.
+
+```
+browser { action: "launch", url: "localhost:3000" }
+browser { action: "attach" }               a browser already running with the flag
+browser { action: "status" }               is one running, and what tabs
+```
+
+### Read a page with snapshot, not with html
+
+This is the single most important habit here, and it is the same habit as
+`search_text` over `file_read`. `snapshot` lists every element you can act on,
+each with a ref:
+
+```
+browser { action: "snapshot" }
+
+https://example.com/login  —  Sign in
+
+e3   email     "Email"  name=user  placeholder="you@example.com"  required
+e4   password  "Password"  name=pass
+e5   select    "Free Pro"  name=plan  options=["free","pro"]
+e6   checkbox  "Remember me"  name=remember  unchecked
+e7   button    "Sign in"
+```
+
+That is a few hundred tokens. The HTML of the same page is tens of thousands.
+Reach for `html` only when you actually need the markup — and then pass
+`clean: true`, which strips scripts, styles and comments first. Use `text` when
+you want what a reader would see.
+
+### Act by ref
+
+```
+browser { action: "fill",  ref: "e3", text: "ada@example.com" }
+browser { action: "fill",  ref: "e4", text: "hunter2", press_enter: true }
+browser { action: "select", ref: "e5", label: "Pro" }
+browser { action: "click", ref: "e7" }
+```
+
+Every element target accepts one of three things, in order of preference:
+
+1. `ref` — from the last snapshot. Cheapest, and it does not break when the
+   markup is restyled.
+2. `selector` — a CSS selector, when you know the page.
+3. `text` — find it by what it says. Ambiguity resolves to the thing you can
+   act on and the innermost match, so `text: "Sign in"` picks the button rather
+   than the heading that says the same words.
+
+Refs live in the page, so **navigating or reloading invalidates them**. That is
+deliberate: a stale ref tells you to snapshot again instead of silently
+clicking the wrong element. After anything that changes the page, snapshot
+again.
+
+`fill` replaces a field's contents; `type` appends to them. `press_enter: true`
+on either one submits most forms without a second call.
+
+### Waiting, instead of guessing
+
+```
+browser { action: "wait", selector: ".results" }        appeared
+browser { action: "wait", text: "Order confirmed" }     rendered
+browser { action: "wait", selector: ".spinner", gone: true }
+browser { action: "wait", until: "networkidle" }        requests settled
+browser { action: "wait", ms: 500 }                     last resort
+```
+
+`navigate` already waits for the load event, so you rarely need `wait`
+immediately after it.
+
+### Seeing and diagnosing
+
+```
+browser { action: "screenshot" }                     the viewport, viewable inline
+browser { action: "screenshot", full_page: true }    the whole scrolling page
+browser { action: "screenshot", ref: "e7" }          just that element
+browser { action: "console", level: "error" }        what the page complained about
+browser { action: "network", failed: true }          what did not load
+browser { action: "eval", expression: "store.getState().user" }
+```
+
+When something on a page does not behave, `console` and `network` usually
+answer it in one call — much cheaper than screenshotting and squinting.
+
+`eval` takes an expression (`document.title`, `({a: 1})`) or a body with a
+`return`. It awaits promises.
+
+### Costs and courtesies
+
+- A screenshot is billed by area, about `width × height / 750` tokens. It is
+  scaled to `max_width` (1200 by default) before you see it; lower it when you
+  only need the gist, and pass `view: false` when you only want the file saved.
+- `snapshot` before `screenshot`. The element list is usually the answer, and
+  it costs a fraction as much.
+- `close` only ever closes a browser this server launched. A browser you
+  attached to stays open — do not promise the user otherwise.
+- Dialogs (`alert`, `confirm`) are answered automatically, and reported. If a
+  click seemed to do nothing, check `console`: an unanswered dialog used to be
+  the usual culprit and now the message is simply waiting for you.
+
+## The screen
+
+`screen` is for everything that is not a web page.
+
+```
+screen { action: "shot" }                                    the whole desktop
+screen { action: "shot", mode: "display", display: "2" }     one monitor
+screen { action: "shot", mode: "window", window: "Figma" }   one window by title
+screen { action: "shot", mode: "region", x: 0, y: 0, width: 900, height: 240 }
+screen { action: "displays" }    what monitors exist, and the coordinate space
+screen { action: "windows" }     what windows are open, largest first
+screen { action: "view", path: "designs/mockup.png" }   look at any image on disk
+```
+
+Two things to keep in mind:
+
+- **A full-screen capture shows everything on screen**, including windows that
+  have nothing to do with the task. When you only need one thing, use
+  `mode: "window"` or `mode: "region"` — it is cheaper and it is more
+  considerate.
+- **There may be no screen at all.** On a server, in a container or over plain
+  SSH, `screen` will tell you there is no graphical session. That is not a
+  fault to work around: if you need a picture of a web page, use
+  `browser screenshot`, which renders headlessly and needs no display.
+
+`view` is worth remembering for its own sake: it turns any png/jpeg/gif/webp on
+disk into something you can actually look at — a screenshot from earlier in the
+task, a chart a script just produced, a mockup the user pointed you at.
+
 ## Long-running work
 
 Never block on a 10-minute build. Start it, then poll with one call:
@@ -456,7 +593,10 @@ that is a deliberate operator setting: report it, do not try to work around it.
 9. `quiet: true` on `shell_exec` when the exit code is the whole answer.
 10. `assign` a value into a server variable instead of carrying it through
     the conversation, then use `${vars.name}`.
-11. Background anything slow instead of waiting on it.
+11. `browser snapshot` to read a page; `html` only when you need the markup.
+12. Lower `max_width` on a screenshot when you only need the gist — an image
+    costs `width × height / 750` tokens.
+13. Background anything slow instead of waiting on it.
 
 ## Things that will bite you
 
@@ -474,3 +614,11 @@ that is a deliberate operator setting: report it, do not try to work around it.
   multi-line scripts and quotes work normally.
 - `code outline` is pattern-based, not a real parser. It is for orientation;
   trust `file_read` for exact content.
+- Browser refs go stale the moment the page navigates or reloads. Snapshot
+  again rather than reusing them.
+- `browser close` does not close a browser you attached to, only one this
+  server launched.
+- `screen` needs a desktop; `browser screenshot` does not. On a headless
+  machine only the second one works.
+- A saved JPEG screenshot is the scaled copy (JPEG cannot be resized in
+  process); a saved PNG is full resolution.

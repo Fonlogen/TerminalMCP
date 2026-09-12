@@ -7,11 +7,14 @@
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { loadConfig } from '../src/config.js';
 import { Server, serveStdio, SERVER_NAME, SERVER_VERSION, log } from '../src/server.js';
 import { serveHttp } from '../src/http.js';
 import { detectAvailable, resolveShell } from '../src/shells.js';
 import { buildToolset, describeGroups, GROUP_NAMES, ALIASES } from '../src/tools/index.js';
+import { findBrowser } from '../src/cdp.js';
+import { LINUX_CAPTURERS, sessionType } from '../src/screen.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -65,12 +68,18 @@ Options:
   --persist-secrets      also write variables marked secret to that file
   --max-vars <n>         how many variables may be stored (default 200)
   --max-var-bytes <n>    size cap per variable (default 1048576)
+  --browser-path <file>  Chromium-family binary for the browser tool (else auto-detected)
+  --no-headless          launch the browser with a visible window
+  --shots-dir <dir>      where screenshots are saved (default <cwd>/.terminalmcp/shots)
+  --max-image-width <n>  scale screenshots to this width before returning (default 1200).
+                         An image costs roughly width x height / 750 tokens, so this matters.
   --tools <profile>      which tool groups to expose (default all). Tool schemas cost tokens
                          on every request, so trim them when you do not need them:
-                           all      everything (26 tools, ~11.5k tokens)
+                           all      everything (28 tools, ~13.9k tokens)
                            core     shell, jobs, bulk, files, vars (10 tools, ~4.8k)
                            dev      core + search, git, fs, dev, data (~9.2k)
                            ops      core + search, fs, archive, sys, net (~8.5k)
+                           web      core + browser, screen, net, search, fs (~10.6k)
                          Or a list: --tools core,git,search  /  --tools all,-watch,-archive
                          Groups: ${GROUP_NAMES.join(', ')}
   -h, --help             this text
@@ -79,6 +88,7 @@ Options:
 Env: TERMINALMCP_SHELL, TERMINALMCP_CWD, TERMINALMCP_TIMEOUT_MS, TERMINALMCP_MAX_OUTPUT_BYTES,
      TERMINALMCP_LOGIN, TERMINALMCP_KEEP_ANSI, TERMINALMCP_READ_ONLY, TERMINALMCP_LOG_FILE,
      TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG, TERMINALMCP_TOOLS, TERMINALMCP_VARS_FILE,
+     TERMINALMCP_BROWSER_PATH, TERMINALMCP_BROWSER_HEADLESS, TERMINALMCP_SHOTS_DIR,
      TERMINALMCP_HTTP, TERMINALMCP_HTTP_HOST, TERMINALMCP_HTTP_PORT, TERMINALMCP_HTTP_PATH,
      TERMINALMCP_HTTP_CORS
 `;
@@ -102,6 +112,16 @@ function overridesFrom(args) {
   if (args.persist_secrets) o.persistSecrets = true;
   if (args.max_vars !== undefined) o.maxVars = Number(args.max_vars);
   if (args.max_var_bytes !== undefined) o.maxVarBytes = Number(args.max_var_bytes);
+
+  const browser = {};
+  if (typeof args.browser_path === 'string') browser.executable = args.browser_path;
+  if (args.no_headless) browser.headless = false;
+  if (Object.keys(browser).length) o.browser = browser;
+
+  const shots = {};
+  if (typeof args.shots_dir === 'string') shots.dir = args.shots_dir;
+  if (args.max_image_width !== undefined) shots.maxWidth = Number(args.max_image_width);
+  if (Object.keys(shots).length) o.screenshots = shots;
 
   const http = {};
   if (args.http) http.enabled = true;
@@ -190,6 +210,36 @@ function printHttpConfigSnippet(cfg) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
+/** Whether the browser tool will find something to drive, without launching it. */
+function describeBrowser(cfg) {
+  try {
+    const b = findBrowser(cfg.browser.executable);
+    return `${b.path} (${b.kind}, found via ${b.source})${cfg.browser.headless ? ', headless' : ', windowed'}`;
+  } catch {
+    return 'no Chromium-family browser found — `browser attach` can still drive one started with --remote-debugging-port';
+  }
+}
+
+/** Whether the screen tool has a desktop and a capture back end. */
+function describeScreen() {
+  const session = sessionType();
+  if (!session) return 'no graphical session (DISPLAY/WAYLAND_DISPLAY unset) — desktop capture unavailable, browser screenshots still work';
+  if (session === 'windows') return 'windows — PowerShell + System.Drawing';
+  if (session === 'quartz') return 'macOS — screencapture (needs Screen Recording permission)';
+  const found = LINUX_CAPTURERS.filter((c) => onPathSync(c.name)).map((c) => c.name);
+  return found.length
+    ? `${session} — ${found.join(', ')}`
+    : `${session} — no capture tool installed (try: apt install ${session === 'wayland' ? 'grim' : 'maim'})`;
+}
+
+function onPathSync(name) {
+  const sep = process.platform === 'win32' ? ';' : ':';
+  for (const dir of (process.env.PATH || '').split(sep).filter(Boolean)) {
+    if (existsSync(join(dir, name))) return true;
+  }
+  return false;
+}
+
 function doctor(cfg) {
   const toolset = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } });
   const shell = (() => {
@@ -216,6 +266,9 @@ function doctor(cfg) {
     `allowedRoots ${cfg.allowedRoots.length ? cfg.allowedRoots.join(', ') : '(unrestricted)'}`,
     `denyCommands ${cfg.denyCommands.length || 0} pattern(s)`,
     `vars store  ${cfg.varsFile ? `mirrored to ${cfg.varsFile}` : 'memory only'}, max ${cfg.maxVars} x ${cfg.maxVarBytes}B`,
+    `browser     ${describeBrowser(cfg)}`,
+    `screen      ${describeScreen()}`,
+    `images      scaled to <=${cfg.screenshots.maxWidth}px wide, saved under ${cfg.screenshots.dir || '<cwd>/.terminalmcp/shots'}`,
     `profile     ${cfg.tools} -> ${toolset.groups.join(', ')}`,
     `tools       ${toolset.tools.length} tools, ~${toolset.estimatedTokens} tokens of schema per request`,
     ...describeGroups(toolset.groups).map(

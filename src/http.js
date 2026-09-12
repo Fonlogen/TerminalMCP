@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { SERVER_NAME, SERVER_VERSION, log } from './server.js';
 import { stopAllWatchers } from './tools/watch.js';
+import { killBrowserSync } from './tools/browser.js';
 
 const SSE_KEEPALIVE_MS = 15000;
 const SESSION_IDLE_MS = 30 * 60 * 1000;
@@ -481,6 +482,8 @@ export function serveHttp(server, options = {}) {
     implicitSession.closeStreams();
     const n = server.jobs.killAll('SIGTERM');
     const w = stopAllWatchers();
+    // A browser we launched must not outlive the server that launched it.
+    const b = killBrowserSync();
     if (n || w) log(`terminated ${n} job(s), closed ${w} watcher(s)`);
     httpServer.close(() => process.exit(0));
     // Do not let a lingering keep-alive socket hold the process open.

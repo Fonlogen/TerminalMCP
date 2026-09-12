@@ -15,6 +15,8 @@ import * as net from './net.js';
 import * as dev from './dev.js';
 import * as data from './data.js';
 import * as watch from './watch.js';
+import * as browser from './browser.js';
+import * as screen from './screen.js';
 import * as varsTool from './vars.js';
 
 /** Group modules export TOOLS + createHandlers; normalise that shape here. */
@@ -46,6 +48,8 @@ export const GROUPS = {
   dev: group('package managers, project detection, code outline', dev),
   data: group('JSON query/patch, diff/patch, encode/hash', data),
   watch: group('watch paths for changes', watch),
+  browser: group('drive a real browser: navigate, read, click, screenshot', browser),
+  screen: group('screenshot the desktop, a window or a region; view images', screen),
 };
 
 export const GROUP_NAMES = Object.keys(GROUPS);
@@ -58,6 +62,8 @@ export const ALIASES = {
   dev: ['core', 'search', 'git', 'dev', 'data', 'fs'],
   // Driving a machine rather than writing code.
   ops: ['core', 'search', 'fs', 'sys', 'net', 'archive'],
+  // Looking at things: a web app under test, or whatever is on screen.
+  web: ['core', 'browser', 'screen', 'net', 'search', 'fs'],
 };
 
 export const DEFAULT_PROFILE = 'all';

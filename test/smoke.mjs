@@ -104,7 +104,7 @@ async function main() {
     const list = await c.send('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
     // The default profile is "all"; the core-only profile is checked below.
-    check('tools/list exposes the full profile', names.length === 26, `${names.length}: ${names.join(',')}`);
+    check('tools/list exposes the full profile', names.length === 28, `${names.length}: ${names.join(',')}`);
     check('core tools are present', ['shell_exec', 'shell_bulk', 'file_edit'].every((n) => names.includes(n)), names.join(','));
     check('extended groups are present', ['search_text', 'git', 'fs_op', 'archive', 'sys_info', 'proc', 'http_request', 'net', 'pkg', 'project_info', 'code', 'json_tool', 'diff', 'encode', 'watch', 'vars'].every((n) => names.includes(n)), names.join(','));
     check('every tool has an inputSchema', (list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'));
@@ -458,7 +458,7 @@ async function main() {
         protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'profile-test', version: '1' },
       });
       const trimmedNames = ((await trimmed.send('tools/list', {})).result?.tools ?? []).map((t) => t.name);
-      check('removals in a profile work', trimmedNames.length === 24 && !trimmedNames.includes('watch') && !trimmedNames.includes('archive'), trimmedNames.join(','));
+      check('removals in a profile work', trimmedNames.length === 26 && !trimmedNames.includes('watch') && !trimmedNames.includes('archive'), trimmedNames.join(','));
       trimmed.close();
     }
 

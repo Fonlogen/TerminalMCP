@@ -7,6 +7,7 @@ import process from 'node:process';
 import { appendFile } from 'node:fs/promises';
 import { buildToolset } from './tools/index.js';
 import { stopAllWatchers } from './tools/watch.js';
+import { killBrowserSync } from './tools/browser.js';
 import { VarStore } from './vars.js';
 import { applyInterpolation, varContext, unresolvedNote } from './tools/interpolate.js';
 import { JobManager } from './jobs.js';
@@ -106,9 +107,10 @@ export class Server {
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
             instructions:
-              'Full terminal and system control. Batch work through shell_bulk instead of many ' +
-              'shell_exec calls; locate code with search_text instead of reading whole files; ' +
-              'patch files with file_edit; call project_info once to orient in an unfamiliar repo.',
+              'Full terminal, browser and system control. Batch work through shell_bulk instead ' +
+              'of many shell_exec calls; locate code with search_text instead of reading whole ' +
+              'files; patch files with file_edit; call project_info once to orient in an ' +
+              'unfamiliar repo; read a web page with browser snapshot rather than its HTML.',
           });
         }
 
@@ -170,12 +172,10 @@ export class Server {
     const { args: expanded, unresolved } = applyInterpolation(name, args, varContext(this.vars));
 
     try {
-      const text = await handler(expanded);
+      const out = await handler(expanded);
       const note = unresolvedNote(unresolved, this.vars);
       this.audit({ tool: name, ok: true, ms: Date.now() - startedAt, args: redact(expanded) });
-      return result(id, {
-        content: [{ type: 'text', text: note ? `${text}\n${note}` : String(text) }],
-      });
+      return result(id, { content: toContent(out, note) });
     } catch (err) {
       this.audit({ tool: name, ok: false, ms: Date.now() - startedAt, error: err.message, args: redact(expanded) });
       const prefix = err instanceof PolicyError ? 'Policy' : 'Error';
@@ -188,6 +188,27 @@ export class Server {
       });
     }
   }
+}
+
+/**
+ * Shape a handler's return value into MCP content blocks.
+ *
+ * Handlers normally return a string, because almost everything a terminal
+ * does is text. A screenshot cannot be, so a handler may instead return
+ * { text, images } and get real image blocks — which is what lets the model
+ * actually look at what it captured rather than be told a file exists.
+ */
+function toContent(out, note) {
+  const isRich = out && typeof out === 'object' && !Array.isArray(out);
+  const text = isRich ? (out.text ?? '') : String(out);
+  const content = [{ type: 'text', text: note ? `${text}\n${note}` : text }];
+
+  if (isRich && Array.isArray(out.images)) {
+    for (const img of out.images) {
+      if (img?.type === 'image' && img.data) content.push(img);
+    }
+  }
+  return content;
 }
 
 function redact(args) {
@@ -251,7 +272,9 @@ export function serveStdio(server, { input = process.stdin, output = process.std
     server.vars.flush();
     const n = server.jobs.killAll('SIGTERM');
     const w = stopAllWatchers();
-    if (n || w) log(`${why}: terminated ${n} job(s), closed ${w} watcher(s)`);
+    // A browser we launched must not outlive the server that launched it.
+    const b = killBrowserSync();
+    if (n || w || b) log(`${why}: terminated ${n} job(s), closed ${w} watcher(s), killed ${b} browser(s)`);
     process.exit(0);
   };
 

@@ -6,3 +6,6 @@ terminalmcp.config.json
 .DS_Store
 .idea/
 .vscode/
+
+# Screenshots and browser downloads land here.
+.terminalmcp/

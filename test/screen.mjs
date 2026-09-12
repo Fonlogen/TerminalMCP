@@ -1,0 +1,253 @@
+// The `screen` tool, over the real protocol.
+//
+// Real capture needs a desktop, which CI does not have, so this suite splits
+// in two: everything that must work anywhere (viewing images, guards, honest
+// failure) always runs, and the actual capture runs only when there is a
+// graphical session to capture.
+
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import process from 'node:process';
+import { encodePng, pngInfo } from '../src/image.js';
+import { sessionType } from '../src/screen.js';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const ENTRY = join(ROOT, 'bin', 'terminalmcp.js');
+
+let passed = 0;
+const failures = [];
+function check(name, cond, detail = '') {
+  if (cond) { passed++; console.log(`  ok  ${name}`); }
+  else { failures.push(`${name} — ${detail}`); console.log(`  FAIL ${name} — ${detail}`); }
+}
+
+class Client {
+  constructor(cwd, extraArgs = []) {
+    this.id = 0;
+    this.pending = new Map();
+    this.buf = '';
+    this.proc = spawn(process.execPath, [ENTRY, '--cwd', cwd, ...extraArgs], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, TERMINALMCP_CONFIG: join(cwd, 'no-such-config.json') },
+    });
+    this.proc.stdout.setEncoding('utf8');
+    this.proc.stdout.on('data', (d) => this._onData(d));
+    this.stderr = '';
+    this.proc.stderr.setEncoding('utf8');
+    this.proc.stderr.on('data', (d) => { this.stderr += d; });
+  }
+  _onData(d) {
+    this.buf += d;
+    let nl;
+    while ((nl = this.buf.indexOf('\n')) !== -1) {
+      const line = this.buf.slice(0, nl).trim();
+      this.buf = this.buf.slice(nl + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      const p = this.pending.get(msg.id);
+      if (p) { this.pending.delete(msg.id); p(msg); }
+    }
+  }
+  send(method, params) {
+    const id = ++this.id;
+    this.proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    return new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error(`timeout on ${method}`)), 60000);
+      this.pending.set(id, (m) => { clearTimeout(t); res(m); });
+    });
+  }
+  async call(name, args) {
+    const res = await this.send('tools/call', { name, arguments: args });
+    if (res.error) return { isError: true, text: res.error.message, images: [] };
+    const content = res.result?.content ?? [];
+    return {
+      isError: Boolean(res.result?.isError),
+      text: content.filter((c) => c.type === 'text').map((c) => c.text).join('\n'),
+      images: content.filter((c) => c.type === 'image'),
+    };
+  }
+  async init() {
+    await this.send('initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'screen-test', version: '1' },
+    });
+    return this;
+  }
+  close() { this.proc.stdin.end(); this.proc.kill(); }
+}
+
+/** A gradient with a solid block, so scaling is visibly verifiable. */
+function fixtureImage(w, h) {
+  const rgba = Buffer.alloc(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      rgba[o] = (x * 255) / w;
+      rgba[o + 1] = (y * 255) / h;
+      rgba[o + 2] = 128;
+      rgba[o + 3] = 255;
+    }
+  }
+  return encodePng({ width: w, height: h, rgba });
+}
+
+async function main() {
+  const dir = await mkdtemp(join(tmpdir(), 'tmcp-screen-'));
+  const session = sessionType();
+  console.log(`\nGraphical session: ${session ?? 'none (headless)'}`);
+
+  const c = await new Client(dir, ['--tools', 'core,screen']).init();
+  try {
+    console.log('\n--- view: any image on disk becomes something the model can see ---');
+    {
+      const big = join(dir, 'big.png');
+      await writeFile(big, fixtureImage(1600, 1000));
+
+      let r = await c.call('screen', { action: 'view', path: big, max_width: 400 });
+      check('view returns an image block', r.images.length === 1 && !r.isError, r.text);
+      check('the block is a png', r.images[0]?.mimeType === 'image/png');
+      const shown = Buffer.from(r.images[0].data, 'base64');
+      check('the image was scaled to the requested width', pngInfo(shown).width === 400, JSON.stringify(pngInfo(shown)));
+      check('the reply says what it scaled', /1600x1000 scaled to 400x250/.test(r.text), r.text);
+      check('the reply gives a token estimate', /~\d+ image tokens/.test(r.text), r.text);
+      check('the reply gives the size on disk', /bytes on disk/.test(r.text), r.text);
+
+      r = await c.call('screen', { action: 'view', path: big, max_width: 5000 });
+      check('an image already small enough is not scaled', /1600x1000, ~/.test(r.text) && !/scaled to/.test(r.text), r.text);
+
+      const small = join(dir, 'small.png');
+      await writeFile(small, fixtureImage(32, 24));
+      r = await c.call('screen', { action: 'view', path: small });
+      check('a small image passes through', /32x24/.test(r.text), r.text);
+    }
+
+    console.log('\n--- view: things that are not images ---');
+    {
+      let r = await c.call('screen', { action: 'view', path: join(dir, 'nope.png') });
+      check('a missing file is reported as missing', r.isError && /Not found/.test(r.text), r.text);
+
+      const txt = join(dir, 'notes.txt');
+      await writeFile(txt, 'just words');
+      r = await c.call('screen', { action: 'view', path: txt });
+      check('a text file is refused', r.isError && /not an image/.test(r.text), r.text);
+      check('...and points at file_read instead', /file_read/.test(r.text), r.text);
+
+      const svg = join(dir, 'logo.svg');
+      await writeFile(svg, '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+      r = await c.call('screen', { action: 'view', path: svg });
+      check('svg is refused with the reason that it is markup', r.isError && /markup/.test(r.text), r.text);
+
+      r = await c.call('screen', { action: 'view', path: dir });
+      check('a directory is refused', r.isError && /directory/.test(r.text), r.text);
+
+      r = await c.call('screen', { action: 'view' });
+      check('view with no path says so', r.isError && /needs "path"/.test(r.text), r.text);
+    }
+
+    console.log('\n--- a real jpeg is passed through unresized ---');
+    {
+      // Minimal JPEG header: enough for the size sniffer, and it must not be
+      // claimed as resizable.
+      const jpeg = Buffer.concat([
+        Buffer.from([0xff, 0xd8]),
+        Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, 0x07, 0x08, 0x0a, 0x00]),
+        Buffer.from([0xff, 0xd9]),
+      ]);
+      const p = join(dir, 'photo.jpg');
+      await writeFile(p, jpeg);
+      const r = await c.call('screen', { action: 'view', path: p, max_width: 100 });
+      check('a jpeg is returned as a jpeg', r.images[0]?.mimeType === 'image/jpeg', r.text);
+      check('and it says why it was not resized', /only PNG can be resized/.test(r.text), r.text);
+    }
+
+    console.log('\n--- bad arguments ---');
+    {
+      let r = await c.call('screen', { action: 'shot', mode: 'region', x: 10, y: 10 });
+      check('region without a size is refused before anything is launched', r.isError && /needs x, y, width and height/.test(r.text), r.text);
+
+      r = await c.call('screen', { action: 'shot', mode: 'region', x: 0, y: 0, width: 0, height: 10 });
+      check('a zero-size region is refused', r.isError && /at least 1|graphical session/.test(r.text), r.text);
+
+      r = await c.call('screen', { action: 'zoom' });
+      check('an unknown action lists the real ones', r.isError && /shot \| view \| displays \| windows/.test(r.text), r.text);
+
+      r = await c.call('screen', {});
+      check('a missing action is reported', r.isError && /needs "action"/.test(r.text), r.text);
+    }
+
+    console.log('\n--- allowedRoots applies to images too ---');
+    {
+      const jailed = await new Client(dir, ['--tools', 'core,screen', '--allowed-root', dir]).init();
+      try {
+        let r = await jailed.call('screen', { action: 'view', path: join(dir, 'big.png') });
+        check('a file inside the root can be viewed', !r.isError && r.images.length === 1, r.text);
+
+        r = await jailed.call('screen', { action: 'view', path: '/etc/hostname' });
+        check('a file outside the root is refused', r.isError, r.text);
+
+        r = await jailed.call('screen', { action: 'shot', path: '/tmp/outside-the-root.png' });
+        check('saving a capture outside the root is refused', r.isError && !/saved/.test(r.text), r.text);
+      } finally {
+        jailed.close();
+      }
+    }
+
+    if (!session) {
+      console.log('\n--- no desktop here: capture must fail clearly, not mysteriously ---');
+      for (const action of [{ action: 'shot' }, { action: 'displays' }, { action: 'windows' }]) {
+        const r = await c.call('screen', action);
+        check(`${action.action} explains that there is no graphical session`, r.isError && /No graphical session/.test(r.text), r.text.slice(0, 120));
+        check(`${action.action} points at the browser tool as the way to screenshot a page`, /browser tool/.test(r.text), r.text.slice(0, 200));
+      }
+    } else {
+      console.log(`\n--- real capture on a ${session} session ---`);
+      {
+        let r = await c.call('screen', { action: 'displays' });
+        check('displays are listed', !r.isError && /display\(s\)/.test(r.text), r.text);
+
+        r = await c.call('screen', { action: 'windows' });
+        // Wayland legitimately refuses this, which is a valid outcome.
+        check('windows are listed, or the refusal is explained', !r.isError || /Wayland|not installed|Accessibility/.test(r.text), r.text.slice(0, 200));
+
+        r = await c.call('screen', { action: 'shot', max_width: 600 });
+        check('a full-screen capture returns an image', !r.isError && r.images.length === 1, r.text.slice(0, 300));
+        if (r.images.length) {
+          check('the capture is a png', r.images[0].mimeType === 'image/png');
+          check('and is scaled to the requested width', pngInfo(Buffer.from(r.images[0].data, 'base64')).width <= 600);
+          const saved = r.text.match(/^saved (.+?) \(/m)?.[1];
+          check('the capture was saved', Boolean(saved) && (await stat(saved).catch(() => null)) !== null, String(saved));
+          check('the reply names the tool that took it', /with \S+/.test(r.text), r.text);
+        }
+
+        r = await c.call('screen', { action: 'shot', mode: 'region', x: 0, y: 0, width: 200, height: 120, save: false });
+        check('a region capture works, or says which tool is missing', !r.isError || /Install one of|cannot capture/.test(r.text), r.text.slice(0, 200));
+        if (!r.isError && r.images.length) {
+          check('the region is the size asked for', pngInfo(Buffer.from(r.images[0].data, 'base64')).width <= 200);
+        }
+
+        r = await c.call('screen', { action: 'shot', mode: 'window', window: 'definitely-no-such-window-xyz', save: false });
+        check('an unmatched window title lists what is open', r.isError && /No window title contains|No visible windows|Wayland|not installed/.test(r.text), r.text.slice(0, 200));
+      }
+    }
+
+    check('the server logged no crashes', !/handler crash|uncaught/.test(c.stderr), c.stderr.slice(-300));
+  } finally {
+    c.close();
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+
+  console.log(`\n${passed} passed, ${failures.length} failed`);
+  if (failures.length) {
+    console.log('\nFailures:');
+    for (const f of failures) console.log(`  - ${f}`);
+    process.exit(1);
+  }
+}
+
+main().catch((err) => {
+  console.error('test harness crashed:', err);
+  process.exit(1);
+});

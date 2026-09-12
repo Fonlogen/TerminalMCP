@@ -51,6 +51,12 @@ export const INTERPOLATE_FIELDS = {
 
   watch: ['path'],
   vars: ['value'],
+
+  // `expression` is absent on purpose: page JavaScript legitimately contains
+  // ${...} in template literals, and rewriting someone's code before running
+  // it in their browser would be the worst possible place to be clever.
+  browser: ['url', 'selector', 'text', 'value', 'label', 'path'],
+  screen: ['path', 'window'],
 };
 
 /** Context every ${...} is resolved against. */

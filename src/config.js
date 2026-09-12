@@ -60,9 +60,48 @@ export const DEFAULTS = {
   maxVarBytes: 1048576,
   maxVarsTotalBytes: 8388608,
 
+  // --- Browser control (the `browser` tool). ---
+  browser: {
+    // Path to a Chromium-family binary. null = look for Chrome, Chromium,
+    // Edge and Brave in the usual places, then in a Playwright/Puppeteer cache.
+    executable: null,
+    // Launch with no visible window. false shows a real one, which is what you
+    // want when a human is watching.
+    headless: true,
+    // Debugging port for browsers we launch. 0 = let the browser pick, which
+    // is race-free (it reports the port back through its profile directory).
+    port: 0,
+    // Profile directory. null = a throwaway temp profile per launch. Point it
+    // at a real directory to keep logins between runs.
+    userDataDir: null,
+    // Extra command-line flags for the browser.
+    args: [],
+    viewport: { width: 1280, height: 800 },
+    // What to do with alert()/confirm(): "accept" or "dismiss". An unanswered
+    // dialog freezes the page, so one of them has to happen.
+    dialogs: 'accept',
+    // Where the browser puts downloads, so the file tools can find them.
+    downloadDir: null,
+    maxConsoleEvents: 300,
+    maxNetworkEvents: 300,
+    commandTimeoutMs: 30000,
+    launchTimeoutMs: 30000,
+  },
+  // --- Screenshots, from the browser or the desktop. ---
+  screenshots: {
+    // Where `save` puts files. null = <cwd>/.terminalmcp/shots.
+    dir: null,
+    // Images are billed by area, so this is the real token control: 1200px
+    // wide is about a tenth of the cost of 4K and still readable.
+    maxWidth: 1200,
+    maxHeight: 1600,
+    maxImageBytes: 5242880,
+  },
+
   // Which tool groups to expose. Tool schemas sit in the model's context on
   // every request, so a smaller profile is cheaper. "all" (default), "core",
-  // "dev", "ops", a list like "core,git,search", or removals: "all,-watch".
+  // "dev", "ops", "web", a list like "core,git,search", or removals:
+  // "all,-browser".
   tools: 'all',
   // HTTP transport. Off by default: stdio is the normal way to run an MCP
   // server. Enable with --http, or set http.enabled here.
@@ -115,6 +154,11 @@ function envOverrides() {
   if (e.TERMINALMCP_LOG_FILE) out.logFile = e.TERMINALMCP_LOG_FILE;
   if (e.TERMINALMCP_TOOLS) out.tools = e.TERMINALMCP_TOOLS;
   if (e.TERMINALMCP_VARS_FILE) out.varsFile = e.TERMINALMCP_VARS_FILE;
+  if (e.TERMINALMCP_BROWSER_PATH) out.browser = { executable: e.TERMINALMCP_BROWSER_PATH };
+  if (e.TERMINALMCP_BROWSER_HEADLESS) {
+    out.browser = { ...(out.browser || {}), headless: truthy(e.TERMINALMCP_BROWSER_HEADLESS) };
+  }
+  if (e.TERMINALMCP_SHOTS_DIR) out.screenshots = { dir: e.TERMINALMCP_SHOTS_DIR };
   if (e.TERMINALMCP_ALLOWED_ROOTS) {
     out.allowedRoots = e.TERMINALMCP_ALLOWED_ROOTS.split(/[;:](?![\\/])/).filter(Boolean);
   }
@@ -149,12 +193,30 @@ export function loadConfig({ cwd = process.cwd(), overrides = {} } = {}) {
   const cfg = { ...DEFAULTS, ...fileCfg, ...envCfg, ...overrides };
   cfg.env = { ...(DEFAULTS.env), ...(fileCfg.env || {}), ...(overrides.env || {}) };
   cfg.shells = { ...(fileCfg.shells || {}), ...(overrides.shells || {}) };
-  // http is a nested object, so merge it layer by layer instead of replacing.
+  // Nested objects merge layer by layer instead of replacing, so setting one
+  // key in a config file does not silently drop the other defaults.
   cfg.http = {
     ...DEFAULTS.http,
     ...(fileCfg.http || {}),
     ...(envCfg.http || {}),
     ...(overrides.http || {}),
+  };
+  cfg.browser = {
+    ...DEFAULTS.browser,
+    ...(fileCfg.browser || {}),
+    ...(envCfg.browser || {}),
+    ...(overrides.browser || {}),
+  };
+  cfg.browser.viewport = {
+    ...DEFAULTS.browser.viewport,
+    ...(fileCfg.browser?.viewport || {}),
+    ...(overrides.browser?.viewport || {}),
+  };
+  cfg.screenshots = {
+    ...DEFAULTS.screenshots,
+    ...(fileCfg.screenshots || {}),
+    ...(envCfg.screenshots || {}),
+    ...(overrides.screenshots || {}),
   };
   cfg.configPath = sourcePath;
 

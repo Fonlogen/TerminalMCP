@@ -85,8 +85,51 @@
   //   "dev"     core + search, git, fs, dev, data   (~8.5k)
   //   "ops"     core + search, fs, archive, sys, net (~7.7k)
   // Or list groups: "core,git,search"   Or remove some: "all,-watch,-archive"
-  // Groups: core, search, git, fs, archive, sys, net, dev, data, watch
+  // Groups: core, vars, search, git, fs, archive, sys, net, dev, data, watch,
+  //         browser, screen
+  // Bundles: all, minimal, dev, ops, web
   "tools": "all",
+
+  // ---- Browser control (the `browser` tool). ----
+  "browser": {
+    // Path to a Chromium-family binary (Chrome, Chromium, Edge, Brave).
+    // null = look in the usual install locations, then $CHROME_PATH, then a
+    // Playwright/Puppeteer cache if one is already on disk. Nothing is
+    // downloaded. Firefox is not supported: it dropped most of its CDP
+    // surface in favour of WebDriver BiDi, a different protocol.
+    "executable": null,
+    // false opens a real window — what you want when a human is watching.
+    "headless": true,
+    // Debugging port for browsers we launch. 0 = let the browser choose,
+    // which is race-free: it reports the port back through its profile dir.
+    "port": 0,
+    // Profile directory, so logins survive between runs.
+    // null = a throwaway temp profile per launch, signed into nothing.
+    "userDataDir": null,
+    "args": [],
+    "viewport": { "width": 1280, "height": 800 },
+    // alert()/confirm() must be answered or the page freezes: "accept" or
+    // "dismiss". Either way the message is reported back.
+    "dialogs": "accept",
+    // Where the browser puts downloads, so the file tools can find them.
+    // null = <cwd>/.terminalmcp/downloads
+    "downloadDir": null,
+    "maxConsoleEvents": 300,
+    "maxNetworkEvents": 300,
+    "commandTimeoutMs": 30000,
+    "launchTimeoutMs": 30000
+  },
+
+  // ---- Screenshots, from the browser or the desktop. ----
+  "screenshots": {
+    // Where captures are saved. null = <cwd>/.terminalmcp/shots
+    "dir": null,
+    // An image costs roughly width x height / 750 tokens, so this is the real
+    // control: 1200px wide is about a tenth of the cost of 4K, and readable.
+    "maxWidth": 1200,
+    "maxHeight": 1600,
+    "maxImageBytes": 5242880
+  },
 
   // ---- Remote HTTP transport (default: off, stdio is used instead). ----
   // There is NO authentication. Binding anything other than 127.0.0.1 gives

@@ -1,7 +1,7 @@
 {
   "name": "terminalmcp",
   "version": "0.1.0",
-  "description": "Zero-dependency MCP server that gives AI agents full control of a machine — shell, filesystem, git, package managers, processes, network — with token efficiency as a design constraint.",
+  "description": "Zero-dependency MCP server giving an AI agent full control of a machine: shell, filesystem, git, package managers, processes, network, a real browser, and the screen \u2014 designed to spend as few tokens as possible.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -22,7 +22,13 @@
     "cross-platform",
     "stdio",
     "streamable-http",
-    "sse"
+    "sse",
+    "browser-automation",
+    "cdp",
+    "chrome-devtools-protocol",
+    "screenshot",
+    "playwright-alternative",
+    "web-scraping"
   ],
   "homepage": "https://github.com/Fonlogen/TerminalMCP#readme",
   "repository": {
@@ -43,7 +49,7 @@
   },
   "scripts": {
     "start": "node bin/terminalmcp.js",
-    "test": "node test/smoke.mjs && node test/guards.mjs && node test/tools.mjs && node test/vars.mjs && node test/http.mjs",
+    "test": "node test/smoke.mjs && node test/guards.mjs && node test/tools.mjs && node test/vars.mjs && node test/image.mjs && node test/screen.mjs && node test/browser.mjs && node test/http.mjs",
     "print-config": "node bin/terminalmcp.js --print-config",
     "test:smoke": "node test/smoke.mjs",
     "test:guards": "node test/guards.mjs",
@@ -53,7 +59,10 @@
     "start:http": "node bin/terminalmcp.js --http",
     "test:tools": "node test/tools.mjs",
     "list-tools": "node bin/terminalmcp.js --list-tools",
-    "test:vars": "node test/vars.mjs"
+    "test:vars": "node test/vars.mjs",
+    "test:image": "node test/image.mjs",
+    "test:screen": "node test/screen.mjs",
+    "test:browser": "node test/browser.mjs"
   },
   "files": [
     "bin",

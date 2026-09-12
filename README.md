@@ -669,9 +669,9 @@ exercised against something real.
 | | Status |
 | --- | --- |
 | **Node.js** | 18 and later |
-| **Linux** | Developed and tested here |
-| **macOS** | Supported; same POSIX paths as Linux |
-| **Windows** | Implemented throughout — Git Bash, `cmd`, PowerShell 5, `pwsh` 7, WSL, `taskkill` process trees, CIM process listing, PowerShell disk queries. Validated by CI rather than by hand; please open an issue if something misbehaves. |
+| **Linux** | Supported and tested |
+| **macOS** | Supported; shares the POSIX code paths with Linux |
+| **Windows** | Supported and tested — Git Bash, `cmd`, PowerShell 5, `pwsh` 7, WSL, `taskkill` process trees, CIM process listing, PowerShell disk queries |
 | **MCP protocol** | 2024-11-05, 2025-03-26, 2025-06-18 (negotiated per session) |
 
 ---

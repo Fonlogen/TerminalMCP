@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report every platform rather than stopping at the first failure:
+      # Windows and macOS paths differ enough that one result hides the others.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No install step: the server has zero dependencies, which is worth
+      # asserting rather than assuming.
+      - name: Assert there are no dependencies
+        shell: bash
+        run: |
+          node -e '
+            const p = require("./package.json");
+            const n = Object.keys(p.dependencies || {}).length
+                    + Object.keys(p.devDependencies || {}).length;
+            if (n > 0) { console.error("Expected 0 dependencies, found " + n); process.exit(1); }
+            console.log("0 dependencies, as intended");
+          '
+
+      - name: Syntax check every source file
+        shell: bash
+        run: |
+          set -e
+          for f in src/*.js src/tools/*.js bin/*.js test/*.mjs scripts/*.mjs; do
+            node --check "$f"
+          done
+          echo "all files parse"
+
+      - name: Environment report
+        run: node bin/terminalmcp.js --doctor
+
+      - name: Test suite
+        run: npm test

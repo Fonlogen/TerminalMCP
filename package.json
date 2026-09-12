@@ -1,7 +1,38 @@
 {
   "name": "terminalmcp",
   "version": "0.1.0",
-  "description": "Token-efficient MCP server giving full terminal/shell control plus surgical file read/write tools. Zero dependencies.",
+  "description": "Zero-dependency MCP server that gives AI agents full control of a machine — shell, filesystem, git, package managers, processes, network — with token efficiency as a design constraint.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "ai-agent",
+    "agent-tools",
+    "shell",
+    "terminal",
+    "command-line",
+    "devops",
+    "automation",
+    "claude",
+    "claude-code",
+    "anthropic",
+    "llm-tools",
+    "token-efficient",
+    "zero-dependency",
+    "cross-platform",
+    "stdio",
+    "streamable-http",
+    "sse"
+  ],
+  "homepage": "https://github.com/Fonlogen/TerminalMCP#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fonlogen/TerminalMCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Fonlogen/TerminalMCP/issues"
+  },
+  "license": "MIT",
   "type": "module",
   "main": "src/server.js",
   "bin": {
@@ -30,16 +61,7 @@
     "skills",
     "scripts",
     "terminalmcp.config.example.json",
-    "README.md"
-  ],
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "shell",
-    "terminal",
-    "ai",
-    "claude"
-  ],
-  "license": "MIT",
-  "private": false
+    "README.md",
+    "LICENSE"
+  ]
 }

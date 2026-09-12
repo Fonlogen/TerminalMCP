@@ -1,0 +1,8 @@
+node_modules/
+npm-debug.log*
+terminalmcp.config.json
+.terminalmcp.json
+*.log
+.DS_Store
+.idea/
+.vscode/

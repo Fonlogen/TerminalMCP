@@ -1,0 +1,174 @@
+#!/usr/bin/env node
+// TerminalMCP entry point.
+//   terminalmcp                 start the MCP server on stdio
+//   terminalmcp --print-config  print a client config snippet to paste
+//   terminalmcp --doctor        check the environment and exit
+
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { loadConfig } from '../src/config.js';
+import { Server, serveStdio, SERVER_NAME, SERVER_VERSION, log } from '../src/server.js';
+import { detectAvailable, resolveShell } from '../src/shells.js';
+import { TOOLS } from '../src/tools.js';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(HERE, '..');
+const ENTRY = join(ROOT, 'bin', 'terminalmcp.js');
+
+function parseArgs(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith('--')) { out._.push(a); continue; }
+    const [rawKey, inlineVal] = a.slice(2).split(/=(.*)/s);
+    const key = rawKey.replace(/-/g, '_');
+    if (inlineVal !== undefined) { out[key] = inlineVal; continue; }
+    const next = argv[i + 1];
+    if (next && !next.startsWith('--')) { out[key] = next; i++; } else { out[key] = true; }
+  }
+  return out;
+}
+
+const HELP = `${SERVER_NAME} v${SERVER_VERSION} — full terminal control over MCP, zero dependencies.
+
+Usage:
+  terminalmcp [options]              start the server (stdio transport)
+  terminalmcp --print-config         print an MCP client config snippet
+  terminalmcp --doctor               report platform, shells and config, then exit
+  terminalmcp --list-tools           list the exposed tools, then exit
+
+Options:
+  --cwd <dir>            default working directory for commands
+  --shell <name|path>    auto | bash | gitbash | zsh | fish | sh | cmd | powershell | pwsh | wsl | /path/to/shell
+  --config <file>        explicit config file (else terminalmcp.config.json / ~/.terminalmcp/config.json)
+  --timeout-ms <n>       default per-command timeout (0 = unlimited)
+  --max-output-bytes <n> byte cap per returned stream
+  --login                run commands through a login shell
+  --read-only            block writes and command execution
+  --allowed-root <dir>   restrict file tools to this directory (repeatable)
+  --log-file <file>      append a JSONL audit log of tool calls
+  -h, --help             this text
+  -v, --version          print the version
+
+Env: TERMINALMCP_SHELL, TERMINALMCP_CWD, TERMINALMCP_TIMEOUT_MS, TERMINALMCP_MAX_OUTPUT_BYTES,
+     TERMINALMCP_LOGIN, TERMINALMCP_KEEP_ANSI, TERMINALMCP_READ_ONLY, TERMINALMCP_LOG_FILE,
+     TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG
+`;
+
+function overridesFrom(args) {
+  const o = {};
+  if (typeof args.cwd === 'string') o.cwd = args.cwd;
+  if (typeof args.shell === 'string') o.shell = args.shell;
+  if (args.timeout_ms !== undefined) o.timeoutMs = Number(args.timeout_ms);
+  if (args.max_output_bytes !== undefined) o.maxOutputBytes = Number(args.max_output_bytes);
+  if (args.login) o.login = true;
+  if (args.keep_ansi) o.keepAnsi = true;
+  if (args.read_only) o.readOnly = true;
+  if (typeof args.log_file === 'string') o.logFile = args.log_file;
+  if (args.allowed_root) {
+    o.allowedRoots = Array.isArray(args.allowed_root) ? args.allowed_root : [args.allowed_root];
+  }
+  if (args.max_jobs !== undefined) o.maxJobs = Number(args.max_jobs);
+  return o;
+}
+
+function printConfigSnippet(cfg) {
+  const block = {
+    mcpServers: {
+      terminal: {
+        command: 'node',
+        args: [ENTRY],
+        env: {
+          TERMINALMCP_CWD: cfg.cwd,
+          ...(cfg.shell !== 'auto' ? { TERMINALMCP_SHELL: String(cfg.shell) } : {}),
+        },
+      },
+    },
+  };
+
+  const lines = [
+    '# Claude Code / Claude Desktop / Cursor  (claude_desktop_config.json, .mcp.json)',
+    JSON.stringify(block, null, 2),
+    '',
+    '# Claude Code, one-liner:',
+    `claude mcp add terminal -- node "${ENTRY}"`,
+    '',
+    '# VS Code (.vscode/mcp.json):',
+    JSON.stringify(
+      { servers: { terminal: { type: 'stdio', command: 'node', args: [ENTRY] } } },
+      null,
+      2,
+    ),
+  ];
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+function doctor(cfg) {
+  const active = (() => {
+    try {
+      return resolveShell(cfg.shell, cfg.shells);
+    } catch (err) {
+      return { name: 'ERROR', command: err.message, mode: '-' };
+    }
+  })();
+  const out = [
+    `${SERVER_NAME} v${SERVER_VERSION}`,
+    `node        ${process.version}`,
+    `platform    ${process.platform}/${process.arch}`,
+    `entry       ${ENTRY}`,
+    `cwd         ${cfg.cwd}`,
+    `config      ${cfg.configPath || '(none, using defaults)'}`,
+    `shell spec  ${cfg.shell}`,
+    `resolved    ${active.name} -> ${active.command} (mode=${active.mode})`,
+    `shells here ${detectAvailable().map((s) => `${s.name}=${s.command}`).join('\n            ') || '(none detected!)'}`,
+    `timeout     ${cfg.timeoutMs}ms`,
+    `max output  ${cfg.maxOutputBytes} bytes`,
+    `max jobs    ${cfg.maxJobs}`,
+    `read-only   ${cfg.readOnly}`,
+    `allowedRoots ${cfg.allowedRoots.length ? cfg.allowedRoots.join(', ') : '(unrestricted)'}`,
+    `denyCommands ${cfg.denyCommands.length || 0} pattern(s)`,
+    `tools       ${TOOLS.length}: ${TOOLS.map((t) => t.name).join(', ')}`,
+  ];
+  process.stdout.write(`${out.join('\n')}\n`);
+  const major = Number(process.versions.node.split('.')[0]);
+  if (major < 18) {
+    process.stdout.write(`\nWARNING: node ${process.version} is too old; TerminalMCP needs >= 18.\n`);
+    process.exitCode = 1;
+  }
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.help || args.h) { process.stdout.write(HELP); return; }
+  if (args.version || args.v) { process.stdout.write(`${SERVER_VERSION}\n`); return; }
+
+  if (typeof args.config === 'string') process.env.TERMINALMCP_CONFIG = args.config;
+
+  let cfg;
+  try {
+    cfg = loadConfig({ overrides: overridesFrom(args) });
+  } catch (err) {
+    process.stderr.write(`Config error: ${err.message}\n`);
+    process.exit(2);
+  }
+
+  if (args.print_config) { printConfigSnippet(cfg); return; }
+  if (args.doctor) { doctor(cfg); return; }
+  if (args.list_tools) {
+    process.stdout.write(
+      TOOLS.map((t) => `${t.name}\n  ${t.description}`).join('\n\n') + '\n',
+    );
+    return;
+  }
+
+  const server = new Server(cfg);
+  log(
+    `v${SERVER_VERSION} ready — shell=${cfg.shell} cwd=${cfg.cwd} ` +
+    `tools=${TOOLS.length}${cfg.readOnly ? ' [READ-ONLY]' : ''}`,
+  );
+  serveStdio(server);
+}
+
+main();

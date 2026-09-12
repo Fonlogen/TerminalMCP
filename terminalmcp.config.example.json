@@ -1,0 +1,68 @@
+{
+  // Copy to terminalmcp.config.json (next to the server, or in the working
+  // directory), or to ~/.terminalmcp/config.json. Comments are allowed.
+  // Every field is optional — the defaults below are what the server uses.
+
+  // Shell to run commands in.
+  //   "auto"  -> system default: pwsh > powershell > cmd on Windows,
+  //              $SHELL then bash > zsh > sh elsewhere
+  // Named:     "bash", "gitbash", "zsh", "fish", "sh",
+  //            "cmd", "powershell", "pwsh", "wsl"
+  // Or an absolute path: "C:/Program Files/Git/bin/bash.exe"
+  "shell": "auto",
+
+  // Extra shells you can then select by name, per call or as "shell" above.
+  "shells": {
+    // "busybox": { "command": "C:/tools/busybox.exe", "args": ["sh", "-c"] },
+    // "docker":  { "command": "docker", "args": ["exec", "-i", "web", "sh", "-c"] }
+  },
+
+  // Run through a login shell (-lc) so ~/.profile aliases and PATH apply.
+  "login": false,
+
+  // Default working directory. null = the directory the server was started in.
+  "cwd": null,
+
+  // Per-command timeout in ms; the whole process tree is killed. 0 = no limit.
+  "timeoutMs": 120000,
+
+  // Byte cap per returned stream before middle-truncation (~4 bytes/token).
+  "maxOutputBytes": 16000,
+
+  // In-memory buffer cap per stream for background jobs.
+  "maxBufferBytes": 8388608,
+
+  // Environment variables injected into every command.
+  "env": {},
+
+  // Keep ANSI colour codes in output (costs tokens; off by default).
+  "keepAnsi": false,
+
+  // Background job limits.
+  "maxJobs": 32,
+  "jobRetentionMs": 1800000,
+
+  // ---- Optional guardrails. Leave as-is for unrestricted access. ----
+
+  // Restrict the file tools to these directories (also blocks symlink escapes).
+  "allowedRoots": [],
+
+  // Refuse commands matching any of these regexes (case-insensitive).
+  "denyCommands": [
+    // "rm\\s+-rf\\s+/",
+    // "mkfs",
+    // ":\\(\\)\\{.*\\};:"
+  ],
+
+  // Refuse writes to paths matching any of these regexes.
+  "denyPaths": [
+    // "\\.env$",
+    // "id_rsa"
+  ],
+
+  // Block all writes and all command execution (inspection only).
+  "readOnly": false,
+
+  // Append a JSONL audit line per tool call.
+  "logFile": null
+}

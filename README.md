@@ -6,13 +6,14 @@
 
 A zero-dependency MCP server that hands an AI complete control of a machine —
 shell, filesystem, git, package managers, processes, network, a real browser and
-the screen itself — and is built so that the whole thing costs a fraction of the
-tokens a naive tool server burns.
+the screen itself — plus optional plugins for the places that work actually gets
+reported: Discord, Telegram, and FiveM servers. Built so the whole thing costs a
+fraction of the tokens a naive tool server burns.
 
 [![CI](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2018-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success)](package.json)
-[![Tests](https://img.shields.io/badge/tests-595%20assertions-success)](test)
+[![Tests](https://img.shields.io/badge/tests-724%20assertions-success)](test)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-635BFF)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -221,6 +222,28 @@ screen { action: "shot" }                                    the whole desktop
 screen { action: "shot", mode: "window", window: "Figma" }   one window
 screen { action: "shot", mode: "region", x: 0, y: 0, width: 900, height: 240 }
 screen { action: "view", path: "designs/mockup.png" }
+```
+
+**Closing the loop with a person.** The work is only finished when somebody
+knows about it. Optional plugins put the result where they already are — and
+`wait` blocks until they answer, so asking a question costs one call rather
+than a polling loop:
+
+```
+screen   { action: "shot", mode: "window", window: "Grafana" }
+telegram { action: "send_file", path: ".terminalmcp/shots/…png", caption: "before the fix" }
+telegram { action: "updates", wait: 120 }      blocks until they reply
+```
+
+**Running a game server.** The `fivem` plugin answers "is it up and who is on
+it" with no credentials at all, then drives the rest over RCON or txAdmin —
+including the F8 client console, which is where client-side script errors
+actually appear:
+
+```
+fivem { action: "status" }
+fivem { action: "resource", resource: "esx_ambulancejob", op: "restart" }
+fivem { action: "f8", errors: true }
 ```
 
 ---
@@ -494,6 +517,146 @@ file on disk stays the good copy while the reply stays cheap.
 
 ---
 
+## Optional plugins
+
+Three integrations ship with the server and **none of them are on by default**.
+That is the same logic as tool profiles: a schema in the model's context costs
+tokens on every single request, and most sessions have no business talking to
+Discord.
+
+```bash
+node bin/terminalmcp.js --plugin discord
+node bin/terminalmcp.js --plugin fivem --plugin telegram
+```
+
+or in the config file:
+
+```json
+{ "plugins": ["fivem", "telegram"] }
+```
+
+A plugin is never part of `all` — naming it is what enables it. Once loaded it
+behaves like any other group, so `--tools all,-telegram` still removes it, and
+`--doctor` reports whether it is actually configured:
+
+```
+plugins
+  fivem     server 10.0.0.5:30120, rcon password set, txAdmin http://10.0.0.5:40120 (env token)
+  telegram  token set (…4f2a), default chat -1001234567890
+```
+
+### Credentials
+
+Secrets never have to live in the config file. Any string value may be written
+`"env:NAME"` and is read from that environment variable instead:
+
+```json
+{
+  "plugins": ["telegram"],
+  "pluginConfig": {
+    "telegram": { "token": "env:TELEGRAM_BOT_TOKEN", "defaultChat": "-1001234567890" }
+  }
+}
+```
+
+An unset variable is reported as *not configured*, with instructions — not as a
+mysterious 401 three calls later.
+
+Every plugin registers its secrets with a redactor, and everything it returns
+passes through it. This matters more than it sounds: the Telegram Bot API puts
+the token **in the URL**, so a naive error message publishes it to the
+transcript and the audit log. Here it comes back as `<redacted>`, and there is a
+test that fails if it ever does not.
+
+### `fivem` — FiveM / RedM servers
+
+Four different things get called "the console", and the plugin is explicit
+about which is which.
+
+| Action | What it uses |
+| --- | --- |
+| `status`, `players`, `resources` | The public `/info.json`, `/players.json`, `/dynamic.json`. **No credentials at all.** |
+| `rcon`, `resource`, `say`, `kick` | RCON — the Quake-style UDP protocol, implemented here by hand. Needs `rcon_password` in `server.cfg`. |
+| `f8` | The game client's `CitizenFX.log`, which is where client-side `SCRIPT ERROR` lines land. |
+| `f8_exec`, `client_lua`, `server_lua` | The optional bridge resource (below). |
+| `tx_status`, `tx_control`, `tx_announce`, `tx_log` | txAdmin. |
+
+Two honest notes rather than marketing:
+
+- **If TerminalMCP started the FXServer, don't use RCON.** `shell_exec_async` +
+  `shell_job` gives you its real stdout and stdin — nothing to lose to a
+  dropped datagram, and you can type into it. The plugin says so in its own
+  error messages.
+- **Only `/host/status` is a documented txAdmin API.** The other `tx_*` actions
+  drive txAdmin's own panel interface, which can change between versions. They
+  work, they are tested against the shapes txAdmin's source actually uses, and
+  they will tell you plainly when a version has moved underneath them.
+
+**Typing into a player's F8 console** is not something any remote protocol can
+do — so an optional in-game resource ships in
+[`plugins/fivem/resource/`](plugins/fivem/resource/). Install it and `f8_exec`
+runs a command in a chosen player's console for real, while `client_lua` and
+`server_lua` evaluate Lua and hand back the value:
+
+```
+fivem { action: "client_lua", player: "3", lua: "GetEntityCoords(PlayerPedId())" }
+```
+
+Read [its README](plugins/fivem/resource/README.md) before installing it. It
+grants arbitrary Lua execution on your server and on connected clients to
+whoever holds its secret. That is the feature, and it is not for every server.
+
+### `discord`
+
+Works with a bot token, a webhook URL, or both. A webhook needs no application
+and no permissions but can only post; a bot can read, edit, react and list.
+
+```
+discord { action: "send", text: "Deploy finished: 3 services updated" }
+discord { action: "upload", path: "build.log", caption: "the failure" }
+discord { action: "read", limit: 20 }
+discord { action: "wait", wait: 60 }          blocks until someone replies
+```
+
+`@everyone` and role pings are **suppressed unless you pass `mentions: true`**.
+A tool that can ping four thousand people by accident is a bad tool.
+
+Rate limits are handled: a 429 is answered by waiting exactly as long as
+Discord asks, once.
+
+### `telegram`
+
+```
+telegram { action: "send", text: "Backup finished, 4.2GB in 6m12s" }
+telegram { action: "send_file", path: "shot.png", caption: "the dashboard" }
+telegram { action: "updates", wait: 60 }
+```
+
+`updates` uses Telegram's own long polling, so it returns the instant a message
+arrives rather than on a timer, and the read offset is kept server-side — each
+message reaches you exactly once.
+
+### Writing your own
+
+A plugin is an ES module exporting `TOOLS` and `createHandlers` — the same
+shape as [`src/tools/*.js`](src/tools). There is no plugin API to learn beyond
+that. Point at it by path:
+
+```json
+{ "plugins": ["./my-plugins/jira.js"] }
+```
+
+Two extras are worth declaring. `MUTATING_ACTIONS` lists the actions that
+change something outside this machine, and `readOnly` then refuses them
+centrally rather than in each handler. `describe()` returns the one line
+`--doctor` prints, so "is this thing configured" is answerable without making a
+call.
+
+A plugin that fails to load is reported on stderr and skipped. It never stops
+the server — everything else on the machine still works.
+
+---
+
 ## Transports
 
 ### stdio (local, default)
@@ -614,6 +777,8 @@ multi-line scripts and quoting behave the way you expect.
 | `maxJobs` | `32` | Concurrent background jobs. |
 | `jobRetentionMs` | `1800000` | How long finished jobs stay readable. |
 | `tools` | `"all"` | Tool profile — see [Tool profiles](#3-tool-profiles). |
+| `plugins` | `[]` | Optional plugins to load — see [Optional plugins](#optional-plugins). Never implied by `all`. |
+| `pluginConfig` | `{}` | Per-plugin settings, keyed by name. `"env:NAME"` reads a value from the environment. |
 | `varsFile` | `null` | Mirror the variable store to this file so it survives a restart. |
 | `persistSecrets` | `false` | Also write `secret` variables to that file. |
 | `maxVars` / `maxVarBytes` / `maxVarsTotalBytes` | `200` / `1MB` / `8MB` | Variable store limits. |
@@ -641,6 +806,8 @@ node bin/terminalmcp.js --help
 Browser and screen: `--browser-path`, `--no-headless`, `--shots-dir`,
 `--max-image-width`.
 
+Plugins: `--plugin <name|path>`, repeatable.
+
 HTTP: `--http`, `--host`, `--port`, `--path`, `--no-cors`, `--strict-sessions`,
 `--sse-replies`, `--max-body-bytes`.
 
@@ -653,8 +820,14 @@ Commands: `--doctor`, `--print-config`, `--list-tools`, `--help`, `--version`.
 `TERMINALMCP_READ_ONLY`, `TERMINALMCP_LOG_FILE`, `TERMINALMCP_ALLOWED_ROOTS`,
 `TERMINALMCP_CONFIG`, `TERMINALMCP_TOOLS`, `TERMINALMCP_VARS_FILE`,
 `TERMINALMCP_BROWSER_PATH`, `TERMINALMCP_BROWSER_HEADLESS`,
-`TERMINALMCP_SHOTS_DIR`, `TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`,
-`TERMINALMCP_HTTP_PORT`, `TERMINALMCP_HTTP_PATH`, `TERMINALMCP_HTTP_CORS`.
+`TERMINALMCP_SHOTS_DIR`, `TERMINALMCP_PLUGINS`, `TERMINALMCP_HTTP`,
+`TERMINALMCP_HTTP_HOST`, `TERMINALMCP_HTTP_PORT`, `TERMINALMCP_HTTP_PATH`,
+`TERMINALMCP_HTTP_CORS`.
+
+Plugins also read their own conventional variables when the config says so:
+`TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `DISCORD_WEBHOOK_URL`,
+`FIVEM_RCON_PASSWORD`, `TXADMIN_PASSWORD`, `TXHOST_API_TOKEN`,
+`FIVEM_BRIDGE_SECRET`.
 
 ---
 
@@ -707,6 +880,24 @@ knowing exactly how far.
   SSH there is nothing to capture, and it says so — browser screenshots still
   work there, because they render headlessly.
 
+### Plugins reach outside the machine
+
+A shell command affects this computer. Sending a Discord message, kicking a
+player or restarting a game server affects other people, and cannot be undone
+by deleting a file.
+
+- Each plugin declares which of its actions mutate, and **`readOnly` refuses
+  exactly those** while leaving the read-only ones working. So `--read-only`
+  gives you a server that can look at your Discord, your Telegram and your game
+  server without being able to say or break anything.
+- `allowedChannels`, `allowedChats` and the FiveM `allowCommands` /
+  `denyCommands` lists narrow what is reachable at all. A refusal is reported
+  as `Policy: …` so the model knows it was a deliberate setting rather than a
+  bug to route around.
+- Discord pings are suppressed unless explicitly allowed.
+- Plugin secrets are registered with a redactor and scrubbed from every result
+  and every error, including the audit log.
+
 ### Optional guardrails
 
 All off by default, because the server's purpose is unrestricted access. Turn
@@ -758,6 +949,10 @@ src/screen.js             desktop capture per platform, display and window lists
 src/shells.js             shell detection and per-platform invocation
 src/config.js             configuration loading and precedence
 src/guards.js             optional guardrails
+src/plugins.js            plugin loading, secret resolution, redaction
+plugins/fivem/            RCON, txAdmin, the F8 log, and an in-game bridge
+plugins/discord/          bot REST API and webhooks
+plugins/telegram/         bot API with server-side long polling
 src/format.js             output cleanup and truncation
 src/tools/index.js        registry: groups, profiles, token cost
 src/tools/interpolate.js  which fields accept ${...}, declared in one place
@@ -765,7 +960,7 @@ src/tools/*.js            one module per tool group
 skills/terminalmcp/       the skill that teaches a model to use it well
 ```
 
-Roughly 13,500 lines of source, 3,000 lines of tests, zero dependencies.
+Roughly 15,700 lines of source, 3,900 lines of tests, zero dependencies.
 
 ### Implementation notes
 
@@ -816,13 +1011,14 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 595 assertions
+npm test                 # 724 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (97)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: view, guards, honest failure     (30)
+npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (129)
 npm run test:browser     # a real browser: 30 actions end to end            (114)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```
@@ -847,6 +1043,14 @@ received the values. Two parts degrade honestly instead of pretending:
   Wayland, which ones cannot target a window, what to suggest installing).
   The capture commands themselves are only exercised where there is a screen.
 
+The plugin suite needs no accounts and no secrets: it stands up local mock
+servers that speak the real wire formats — including an actual UDP socket that
+checks the RCON packet byte for byte, and a Telegram mock that holds a long
+poll open until a message arrives. It asserts the things that would be
+embarrassing to get wrong: that a token never appears in an error, that
+`readOnly` refuses exactly the outward-facing actions, and that an allow-list
+refusal happens *before* anything goes out on the wire.
+
 ---
 
 ## Compatibility
@@ -860,6 +1064,7 @@ received the values. Two parts degrade honestly instead of pretending:
 | **MCP protocol** | 2024-11-05, 2025-03-26, 2025-06-18 (negotiated per session) |
 | **Browser control** | Chrome, Chromium, Edge, Brave, Vivaldi — anything Chromium-family, on all three platforms. Not Firefox: it dropped most of its CDP surface in favour of WebDriver BiDi, which is a different protocol. |
 | **Desktop capture** | Windows: PowerShell + System.Drawing, nothing to install. macOS: `screencapture`, built in. Linux: whichever of `grim` (Wayland), `maim`, `import`, `scrot`, `spectacle`, `gnome-screenshot` is present — `--doctor` says which it found and what to install if none. |
+| **Plugins** | Platform-independent: HTTPS and UDP. The FiveM client log that `f8` reads is Windows-only, because the FiveM client is. |
 
 The browser paths are tested on Linux against a real Chromium, and the Windows
 and macOS browser paths use the same protocol code — only the search for the
@@ -907,6 +1112,7 @@ exercised on a machine with a screen. If one misbehaves, please open an issue �
 - Persistent shell sessions (keeping `cd` / `export` state)
 - Mouse and keyboard control of the desktop, not just capture of it
 - Firefox via WebDriver BiDi, alongside CDP
+- The Discord gateway, for push delivery instead of polled `wait`
 - A SQL client
 - An optional token for the HTTP transport
 

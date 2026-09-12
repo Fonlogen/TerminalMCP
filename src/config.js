@@ -98,6 +98,17 @@ export const DEFAULTS = {
     maxImageBytes: 5242880,
   },
 
+  // --- Optional plugins: integrations that are off unless asked for. ---
+  // Names of built-in plugins (fivem, discord, telegram), or paths to your
+  // own .js files. A plugin is never part of "all": naming it here is what
+  // enables it, because its tool schemas cost tokens on every request and
+  // most sessions do not need them.
+  plugins: [],
+  // Per-plugin settings, keyed by plugin name. A string value of
+  // "env:SOME_VAR" reads the value from that environment variable, which is
+  // how to keep a token out of a file you might commit.
+  pluginConfig: {},
+
   // Which tool groups to expose. Tool schemas sit in the model's context on
   // every request, so a smaller profile is cheaper. "all" (default), "core",
   // "dev", "ops", "web", a list like "core,git,search", or removals:
@@ -159,6 +170,7 @@ function envOverrides() {
     out.browser = { ...(out.browser || {}), headless: truthy(e.TERMINALMCP_BROWSER_HEADLESS) };
   }
   if (e.TERMINALMCP_SHOTS_DIR) out.screenshots = { dir: e.TERMINALMCP_SHOTS_DIR };
+  if (e.TERMINALMCP_PLUGINS) out.plugins = e.TERMINALMCP_PLUGINS;
   if (e.TERMINALMCP_ALLOWED_ROOTS) {
     out.allowedRoots = e.TERMINALMCP_ALLOWED_ROOTS.split(/[;:](?![\\/])/).filter(Boolean);
   }
@@ -218,6 +230,12 @@ export function loadConfig({ cwd = process.cwd(), overrides = {} } = {}) {
     ...(envCfg.screenshots || {}),
     ...(overrides.screenshots || {}),
   };
+  // Per-plugin settings merge one level down, so setting a Discord token in a
+  // config file does not erase the Telegram block next to it.
+  cfg.pluginConfig = { ...(fileCfg.pluginConfig || {}) };
+  for (const [name, settings] of Object.entries(overrides.pluginConfig || {})) {
+    cfg.pluginConfig[name] = { ...(cfg.pluginConfig[name] || {}), ...settings };
+  }
   cfg.configPath = sourcePath;
 
   // Normalize the base cwd to an absolute, existing directory.

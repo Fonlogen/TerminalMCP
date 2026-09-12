@@ -15,6 +15,7 @@ import { detectAvailable, resolveShell } from '../src/shells.js';
 import { buildToolset, describeGroups, GROUP_NAMES, ALIASES } from '../src/tools/index.js';
 import { findBrowser } from '../src/cdp.js';
 import { LINUX_CAPTURERS, sessionType } from '../src/screen.js';
+import { BUILTIN_PLUGINS, describePlugins, loadPlugins, parsePluginList } from '../src/plugins.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -27,9 +28,16 @@ function parseArgs(argv) {
     if (!a.startsWith('--')) { out._.push(a); continue; }
     const [rawKey, inlineVal] = a.slice(2).split(/=(.*)/s);
     const key = rawKey.replace(/-/g, '_');
-    if (inlineVal !== undefined) { out[key] = inlineVal; continue; }
+    // A flag given more than once accumulates, so --allowed-root and --plugin
+    // can each be repeated rather than the last one silently winning.
+    const set = (v) => {
+      if (out[key] === undefined) out[key] = v;
+      else if (Array.isArray(out[key])) out[key].push(v);
+      else out[key] = [out[key], v];
+    };
+    if (inlineVal !== undefined) { set(inlineVal); continue; }
     const next = argv[i + 1];
-    if (next && !next.startsWith('--')) { out[key] = next; i++; } else { out[key] = true; }
+    if (next && !next.startsWith('--')) { set(next); i++; } else { set(true); }
   }
   return out;
 }
@@ -68,6 +76,9 @@ Options:
   --persist-secrets      also write variables marked secret to that file
   --max-vars <n>         how many variables may be stored (default 200)
   --max-var-bytes <n>    size cap per variable (default 1048576)
+  --plugin <name|path>   enable an optional plugin (repeatable): fivem, discord, telegram,
+                         or a path to your own .js. Off by default — plugin schemas
+                         cost tokens too. Credentials go in the config file or env vars.
   --browser-path <file>  Chromium-family binary for the browser tool (else auto-detected)
   --no-headless          launch the browser with a visible window
   --shots-dir <dir>      where screenshots are saved (default <cwd>/.terminalmcp/shots)
@@ -89,6 +100,7 @@ Env: TERMINALMCP_SHELL, TERMINALMCP_CWD, TERMINALMCP_TIMEOUT_MS, TERMINALMCP_MAX
      TERMINALMCP_LOGIN, TERMINALMCP_KEEP_ANSI, TERMINALMCP_READ_ONLY, TERMINALMCP_LOG_FILE,
      TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG, TERMINALMCP_TOOLS, TERMINALMCP_VARS_FILE,
      TERMINALMCP_BROWSER_PATH, TERMINALMCP_BROWSER_HEADLESS, TERMINALMCP_SHOTS_DIR,
+     TERMINALMCP_PLUGINS,
      TERMINALMCP_HTTP, TERMINALMCP_HTTP_HOST, TERMINALMCP_HTTP_PORT, TERMINALMCP_HTTP_PATH,
      TERMINALMCP_HTTP_CORS
 `;
@@ -112,6 +124,9 @@ function overridesFrom(args) {
   if (args.persist_secrets) o.persistSecrets = true;
   if (args.max_vars !== undefined) o.maxVars = Number(args.max_vars);
   if (args.max_var_bytes !== undefined) o.maxVarBytes = Number(args.max_var_bytes);
+
+  if (args.plugin) o.plugins = Array.isArray(args.plugin) ? args.plugin : [args.plugin];
+  if (typeof args.plugins === 'string') o.plugins = args.plugins;
 
   const browser = {};
   if (typeof args.browser_path === 'string') browser.executable = args.browser_path;
@@ -240,8 +255,8 @@ function onPathSync(name) {
   return false;
 }
 
-function doctor(cfg) {
-  const toolset = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } });
+function doctor(cfg, plugins = { groups: {}, loaded: [], errors: [] }) {
+  const toolset = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } }, plugins.groups);
   const shell = (() => {
     try {
       return resolveShell(cfg.shell, cfg.shells);
@@ -271,11 +286,13 @@ function doctor(cfg) {
     `images      scaled to <=${cfg.screenshots.maxWidth}px wide, saved under ${cfg.screenshots.dir || '<cwd>/.terminalmcp/shots'}`,
     `profile     ${cfg.tools} -> ${toolset.groups.join(', ')}`,
     `tools       ${toolset.tools.length} tools, ~${toolset.estimatedTokens} tokens of schema per request`,
-    ...describeGroups(toolset.groups).map(
+    ...describeGroups(toolset.groups, plugins.groups).map(
       (g) =>
-        `  ${g.active ? '[x]' : '[ ]'} ${g.name.padEnd(8)} ~${String(g.estimatedTokens).padStart(5)} tok  ` +
-        `${g.toolNames.join(', ')}`,
+        `  ${g.active ? '[x]' : '[ ]'} ${g.name.padEnd(9)} ~${String(g.estimatedTokens).padStart(5)} tok  ` +
+        `${g.plugin ? 'plugin: ' : ''}${g.toolNames.join(', ')}`,
     ),
+    `plugins     ${parsePluginList(cfg.plugins).length ? '' : 'none enabled'}`,
+    ...describePlugins(plugins),
     `transport   ${
       cfg.http.enabled
         ? `http on ${cfg.http.host}:${cfg.http.port}${cfg.http.path} (no auth)`
@@ -290,7 +307,7 @@ function doctor(cfg) {
   }
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help || args.h) { process.stdout.write(HELP); return; }
@@ -307,17 +324,23 @@ function main() {
   }
 
   if (args.print_config) { printConfigSnippet(cfg); return; }
-  if (args.doctor) { doctor(cfg); return; }
+
+  // Plugins are loaded before anything reports on the toolset, so --doctor and
+  // --list-tools describe what the server will actually expose.
+  const plugins = await loadPlugins(cfg);
+  for (const e of plugins.errors) process.stderr.write(`[terminalmcp] plugin ${e.name}: ${e.message}\n`);
+
+  if (args.doctor) { doctor(cfg, plugins); return; }
   if (args.list_tools) {
-    const set = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } });
+    const set = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } }, plugins.groups);
     const lines = [
       `profile "${cfg.tools}" -> ${set.tools.length} tools, ~${set.estimatedTokens} tokens of schema`,
       '',
       `groups (bundles: ${Object.keys(ALIASES).join(', ')})`,
-      ...describeGroups(set.groups).map(
+      ...describeGroups(set.groups, plugins.groups).map(
         (g) =>
-          `  ${g.active ? '[x]' : '[ ]'} ${g.name.padEnd(8)} ~${String(g.estimatedTokens).padStart(5)} tok  ` +
-          `${g.label}`,
+          `  ${g.active ? '[x]' : '[ ]'} ${g.name.padEnd(9)} ~${String(g.estimatedTokens).padStart(5)} tok  ` +
+          `${g.plugin ? 'plugin: ' : ''}${g.label}`,
       ),
       '',
       ...set.tools.map((t) => `${t.name}\n  ${t.description}`),
@@ -326,10 +349,11 @@ function main() {
     return;
   }
 
-  const server = new Server(cfg);
+  const server = new Server(cfg, plugins);
   log(
     `v${SERVER_VERSION} ready — shell=${cfg.shell} cwd=${cfg.cwd} ` +
     `tools=${server.tools.length} (${server.toolGroups.join(',')}, ~${server.toolTokens} tok)` +
+    `${plugins.loaded.length ? ` plugins=${plugins.loaded.map((p) => p.name).join(',')}` : ''}` +
     `${cfg.readOnly ? ' [READ-ONLY]' : ''}`,
   );
 
@@ -337,4 +361,7 @@ function main() {
   else serveStdio(server);
 }
 
-main();
+main().catch((err) => {
+  process.stderr.write(`Fatal: ${err.stack || err.message}\n`);
+  process.exit(1);
+});

@@ -28,7 +28,14 @@
     "chrome-devtools-protocol",
     "screenshot",
     "playwright-alternative",
-    "web-scraping"
+    "web-scraping",
+    "fivem",
+    "discord",
+    "telegram",
+    "rcon",
+    "txadmin",
+    "chatops",
+    "plugins"
   ],
   "homepage": "https://github.com/Fonlogen/TerminalMCP#readme",
   "repository": {
@@ -49,7 +56,7 @@
   },
   "scripts": {
     "start": "node bin/terminalmcp.js",
-    "test": "node test/smoke.mjs && node test/guards.mjs && node test/tools.mjs && node test/vars.mjs && node test/image.mjs && node test/screen.mjs && node test/browser.mjs && node test/http.mjs",
+    "test": "node test/smoke.mjs && node test/guards.mjs && node test/tools.mjs && node test/vars.mjs && node test/image.mjs && node test/screen.mjs && node test/plugins.mjs && node test/browser.mjs && node test/http.mjs",
     "print-config": "node bin/terminalmcp.js --print-config",
     "test:smoke": "node test/smoke.mjs",
     "test:guards": "node test/guards.mjs",
@@ -62,7 +69,8 @@
     "test:vars": "node test/vars.mjs",
     "test:image": "node test/image.mjs",
     "test:screen": "node test/screen.mjs",
-    "test:browser": "node test/browser.mjs"
+    "test:browser": "node test/browser.mjs",
+    "test:plugins": "node test/plugins.mjs"
   },
   "files": [
     "bin",

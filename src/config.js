@@ -50,6 +50,20 @@ export const DEFAULTS = {
   readOnly: false,
   // Append a JSONL audit log of every tool call here.
   logFile: null,
+  // HTTP transport. Off by default: stdio is the normal way to run an MCP
+  // server. Enable with --http, or set http.enabled here.
+  http: {
+    enabled: false,
+    host: '127.0.0.1',
+    port: 8787,
+    path: '/mcp',
+    ssePath: '/sse',
+    messagePath: '/messages',
+    maxBodyBytes: 33554432,
+    cors: true,
+    strictSessions: false,
+    sseReplies: false,
+  },
 };
 
 function readJson(path) {
@@ -88,6 +102,15 @@ function envOverrides() {
   if (e.TERMINALMCP_ALLOWED_ROOTS) {
     out.allowedRoots = e.TERMINALMCP_ALLOWED_ROOTS.split(/[;:](?![\\/])/).filter(Boolean);
   }
+
+  const http = {};
+  if (e.TERMINALMCP_HTTP) http.enabled = truthy(e.TERMINALMCP_HTTP);
+  if (e.TERMINALMCP_HTTP_HOST) http.host = e.TERMINALMCP_HTTP_HOST;
+  if (e.TERMINALMCP_HTTP_PORT) http.port = Number(e.TERMINALMCP_HTTP_PORT);
+  if (e.TERMINALMCP_HTTP_PATH) http.path = e.TERMINALMCP_HTTP_PATH;
+  if (e.TERMINALMCP_HTTP_CORS) http.cors = truthy(e.TERMINALMCP_HTTP_CORS);
+  if (Object.keys(http).length) out.http = http;
+
   return out;
 }
 
@@ -106,9 +129,17 @@ export function loadConfig({ cwd = process.cwd(), overrides = {} } = {}) {
     }
   }
 
-  const cfg = { ...DEFAULTS, ...fileCfg, ...envOverrides(), ...overrides };
+  const envCfg = envOverrides();
+  const cfg = { ...DEFAULTS, ...fileCfg, ...envCfg, ...overrides };
   cfg.env = { ...(DEFAULTS.env), ...(fileCfg.env || {}), ...(overrides.env || {}) };
   cfg.shells = { ...(fileCfg.shells || {}), ...(overrides.shells || {}) };
+  // http is a nested object, so merge it layer by layer instead of replacing.
+  cfg.http = {
+    ...DEFAULTS.http,
+    ...(fileCfg.http || {}),
+    ...(envCfg.http || {}),
+    ...(overrides.http || {}),
+  };
   cfg.configPath = sourcePath;
 
   // Normalize the base cwd to an absolute, existing directory.

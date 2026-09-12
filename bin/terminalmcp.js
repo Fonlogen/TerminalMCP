@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { loadConfig } from '../src/config.js';
 import { Server, serveStdio, SERVER_NAME, SERVER_VERSION, log } from '../src/server.js';
+import { serveHttp } from '../src/http.js';
 import { detectAvailable, resolveShell } from '../src/shells.js';
 import { TOOLS } from '../src/tools.js';
 
@@ -34,9 +35,21 @@ const HELP = `${SERVER_NAME} v${SERVER_VERSION} — full terminal control over M
 
 Usage:
   terminalmcp [options]              start the server (stdio transport)
+  terminalmcp --http                 start the server on HTTP instead of stdio
   terminalmcp --print-config         print an MCP client config snippet
   terminalmcp --doctor               report platform, shells and config, then exit
   terminalmcp --list-tools           list the exposed tools, then exit
+
+HTTP transport (no authentication — see README):
+  --http                 serve over HTTP rather than stdio
+  --port <n>             port to listen on (default 8787)
+  --host <addr>          bind address (default 127.0.0.1; use 0.0.0.0 to expose)
+  --path <path>          Streamable HTTP endpoint (default /mcp)
+  --no-cors              do not send CORS headers
+  --strict-sessions      reject requests carrying an unknown Mcp-Session-Id
+  --sse-replies          answer POSTs with an SSE stream even when JSON would do
+                         (only needed behind a proxy that cuts idle responses)
+  --max-body-bytes <n>   request body cap (default 33554432)
 
 Options:
   --cwd <dir>            default working directory for commands
@@ -53,7 +66,9 @@ Options:
 
 Env: TERMINALMCP_SHELL, TERMINALMCP_CWD, TERMINALMCP_TIMEOUT_MS, TERMINALMCP_MAX_OUTPUT_BYTES,
      TERMINALMCP_LOGIN, TERMINALMCP_KEEP_ANSI, TERMINALMCP_READ_ONLY, TERMINALMCP_LOG_FILE,
-     TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG
+     TERMINALMCP_ALLOWED_ROOTS, TERMINALMCP_CONFIG,
+     TERMINALMCP_HTTP, TERMINALMCP_HTTP_HOST, TERMINALMCP_HTTP_PORT, TERMINALMCP_HTTP_PATH,
+     TERMINALMCP_HTTP_CORS
 `;
 
 function overridesFrom(args) {
@@ -70,10 +85,26 @@ function overridesFrom(args) {
     o.allowedRoots = Array.isArray(args.allowed_root) ? args.allowed_root : [args.allowed_root];
   }
   if (args.max_jobs !== undefined) o.maxJobs = Number(args.max_jobs);
+
+  const http = {};
+  if (args.http) http.enabled = true;
+  if (args.port !== undefined) http.port = Number(args.port);
+  if (typeof args.host === 'string') http.host = args.host;
+  if (typeof args.path === 'string') http.path = args.path;
+  if (args.no_cors) http.cors = false;
+  if (args.strict_sessions) http.strictSessions = true;
+  if (args.sse_replies) http.sseReplies = true;
+  if (args.max_body_bytes !== undefined) http.maxBodyBytes = Number(args.max_body_bytes);
+  if (Object.keys(http).length) o.http = http;
+
   return o;
 }
 
 function printConfigSnippet(cfg) {
+  if (cfg.http.enabled) {
+    printHttpConfigSnippet(cfg);
+    return;
+  }
   const block = {
     mcpServers: {
       terminal: {
@@ -104,6 +135,44 @@ function printConfigSnippet(cfg) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
+function printHttpConfigSnippet(cfg) {
+  const { host, port, path, ssePath } = cfg.http;
+  // 0.0.0.0 is a bind address, not something a client can dial.
+  const dialHost = host === '0.0.0.0' || host === '::' ? '<this-machine-ip>' : host;
+  const base = `http://${dialHost}:${port}`;
+
+  const lines = [
+    `# Start the server first:  node "${ENTRY}" --http --host ${host} --port ${port}`,
+    '',
+    '# Claude Code, one-liner:',
+    `claude mcp add --transport http terminal ${base}${path}`,
+    '',
+    '# Claude Desktop / Cursor (.mcp.json, claude_desktop_config.json):',
+    JSON.stringify(
+      { mcpServers: { terminal: { type: 'http', url: `${base}${path}` } } },
+      null,
+      2,
+    ),
+    '',
+    '# VS Code (.vscode/mcp.json):',
+    JSON.stringify(
+      { servers: { terminal: { type: 'http', url: `${base}${path}` } } },
+      null,
+      2,
+    ),
+    '',
+    '# Older clients that only speak the 2024-11-05 HTTP+SSE transport:',
+    JSON.stringify(
+      { mcpServers: { terminal: { type: 'sse', url: `${base}${ssePath}` } } },
+      null,
+      2,
+    ),
+    '',
+    `# Health check:  curl ${base}/health`,
+  ];
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
 function doctor(cfg) {
   const active = (() => {
     try {
@@ -129,6 +198,11 @@ function doctor(cfg) {
     `allowedRoots ${cfg.allowedRoots.length ? cfg.allowedRoots.join(', ') : '(unrestricted)'}`,
     `denyCommands ${cfg.denyCommands.length || 0} pattern(s)`,
     `tools       ${TOOLS.length}: ${TOOLS.map((t) => t.name).join(', ')}`,
+    `transport   ${
+      cfg.http.enabled
+        ? `http on ${cfg.http.host}:${cfg.http.port}${cfg.http.path} (no auth)`
+        : 'stdio'
+    }`,
   ];
   process.stdout.write(`${out.join('\n')}\n`);
   const major = Number(process.versions.node.split('.')[0]);
@@ -168,7 +242,9 @@ function main() {
     `v${SERVER_VERSION} ready — shell=${cfg.shell} cwd=${cfg.cwd} ` +
     `tools=${TOOLS.length}${cfg.readOnly ? ' [READ-ONLY]' : ''}`,
   );
-  serveStdio(server);
+
+  if (cfg.http.enabled) serveHttp(server, cfg.http);
+  else serveStdio(server);
 }
 
 main();

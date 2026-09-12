@@ -8,7 +8,10 @@ Progettato con due obiettivi: **controllo totale** e **risparmio di token**.
 - **Zero dipendenze.** Solo Node.js >= 18. Nessun `npm install`.
 - **Windows, Linux, macOS.** Shell di sistema per default, oppure `bash`,
   Git Bash, `zsh`, `fish`, `cmd`, PowerShell, `pwsh`, WSL o un binario a scelta.
-- **Un solo script per partire.** `./start.sh` o `start.cmd`.
+- **Un solo script per partire.** `./start.sh` o `start.cmd` (locale, stdio),
+  `./start-http.sh` o `start-http.cmd` (remoto, HTTP).
+- **Due trasporti.** stdio in locale; via HTTP sia Streamable HTTP
+  (MCP 2025-06-18) che il legacy HTTP+SSE (MCP 2024-11-05), senza autenticazione.
 - **Skill incluso** che insegna al modello come usarlo spendendo pochi token.
 
 ---
@@ -71,6 +74,112 @@ claude mcp add terminal -- node "/percorso/assoluto/TerminalMCP/bin/terminalmcp.
 npm run install-skill              # -> ~/.claude/skills/terminalmcp
 node scripts/install-skill.mjs --project   # -> ./.claude/skills/terminalmcp
 ```
+
+---
+
+## Trasporto remoto HTTP
+
+Oltre a stdio (locale), il server può girare come servizio HTTP remoto.
+**Non c'è autenticazione**: chi raggiunge la porta ha una shell completa sulla
+macchina. Vedi [Esposizione e rischio](#esposizione-e-rischio) sotto.
+
+```bash
+./start-http.sh                  # Linux/macOS: 0.0.0.0:8787, raggiungibile da fuori
+start-http.cmd                   # Windows: idem
+PORT=9000 ./start-http.sh        # porta diversa
+
+./start.sh --http                # solo locale (127.0.0.1:8787)
+node bin/terminalmcp.js --http --host 0.0.0.0 --port 8787
+```
+
+Verifica che sia su:
+
+```bash
+curl http://<ip>:8787/health
+```
+
+### Endpoint
+
+Vengono serviti entrambi i transport MCP contemporaneamente, così funziona sia
+con i client attuali che con quelli vecchi.
+
+| Metodo | Percorso | Cosa fa |
+| --- | --- | --- |
+| `POST` | `/mcp` | **Streamable HTTP** (MCP 2025-03-26 / 2025-06-18): invii un messaggio JSON-RPC, torna la risposta. |
+| `GET` | `/mcp` | Apre uno stream SSE per i messaggi server→client. |
+| `DELETE` | `/mcp` | Chiude la sessione. |
+| `GET` | `/sse` | **Legacy HTTP+SSE** (MCP 2024-11-05): apre lo stream; il primo evento indica dove fare POST. |
+| `POST` | `/messages?sessionId=…` | Legacy: invia un messaggio, la risposta arriva sullo stream SSE. |
+| `GET` | `/health` o `/` | Stato, tool, sessioni e job attivi in JSON. |
+
+### Registrazione nel client
+
+```bash
+node bin/terminalmcp.js --print-config --http --host 0.0.0.0 --port 8787
+```
+
+**Claude Code:**
+```bash
+claude mcp add --transport http terminal http://<ip>:8787/mcp
+```
+
+**Claude Desktop / Cursor / VS Code:**
+```json
+{ "mcpServers": { "terminal": { "type": "http", "url": "http://<ip>:8787/mcp" } } }
+```
+
+**Client che parlano solo il vecchio SSE:**
+```json
+{ "mcpServers": { "terminal": { "type": "sse", "url": "http://<ip>:8787/sse" } } }
+```
+
+### Sessioni e job
+
+All'`initialize` il server assegna un `Mcp-Session-Id` e lo restituisce
+nell'header; il client lo rimanda nelle richieste successive. La sessione
+conserva la versione di protocollo negoziata, così client diversi possono
+parlare revisioni diverse contemporaneamente. Le sessioni inattive scadono
+dopo 30 minuti.
+
+**Il registro dei job è invece condiviso tra tutte le sessioni**, ed è una
+scelta: il server pilota *una* macchina, quindi un job avviato da un client
+resta leggibile da un altro (o dallo stesso client dopo una riconnessione).
+Con `shell_job {action:"list"}` vedi tutto quello che gira.
+
+Per default un `Mcp-Session-Id` sconosciuto viene comunque servito, invece di
+rispondere 404: tanto non c'è autenticazione, e così non si rompono i client
+che dimenticano l'header. Con `--strict-sessions` si ottiene il comportamento
+rigoroso (404 → il client rifà `initialize`).
+
+### Comandi lunghi
+
+I timeout lato server HTTP sono disattivati, quindi un `shell_exec` da dieci
+minuti non viene troncato. Se hai un reverse proxy davanti che chiude le
+risposte inattive, aggiungi `--sse-replies`: le risposte diventano stream SSE
+con commenti keepalive ogni 15 secondi. In alternativa — ed è la scelta
+migliore comunque — usa `shell_exec_async` e leggi con `shell_job`.
+
+### Esposizione e rischio
+
+Il default di bind è `127.0.0.1` proprio perché aprirsi è una decisione
+esplicita. `start-http.sh` / `start-http.cmd` bindano `0.0.0.0` perché
+esistono per l'uso remoto, e all'avvio il server lo scrive a chiare lettere.
+
+Non c'è autenticazione, quindi **la porta è la credenziale**. Tenuto conto che
+mi hai detto di non preoccuparmene, segnalo solo le due cose che costano poco
+e cambiano molto:
+
+- Non esporre la porta su Internet. Tienila su LAN, VPN (Tailscale,
+  WireGuard) o un tunnel SSH: `ssh -L 8787:127.0.0.1:8787 utente@host` e poi
+  puntare il client su `http://127.0.0.1:8787/mcp`, lasciando il server su
+  `127.0.0.1`.
+- Se ti serve davvero su una rete non fidata, mettici davanti un reverse proxy
+  (Caddy/nginx) con TLS e Basic Auth: il server non ne sa nulla e funziona
+  uguale.
+
+Se un domani volessi restringere le capacità invece della rete, ci sono già
+`allowedRoots`, `denyCommands`, `denyPaths` e `readOnly` (vedi
+[Guardrail](#guardrail-opzionali-disattivi-per-default)).
 
 ---
 
@@ -295,7 +404,8 @@ dell'operatore e non un errore da aggirare.
 `TERMINALMCP_SHELL`, `TERMINALMCP_CWD`, `TERMINALMCP_TIMEOUT_MS`,
 `TERMINALMCP_MAX_OUTPUT_BYTES`, `TERMINALMCP_LOGIN`, `TERMINALMCP_KEEP_ANSI`,
 `TERMINALMCP_READ_ONLY`, `TERMINALMCP_LOG_FILE`, `TERMINALMCP_ALLOWED_ROOTS`,
-`TERMINALMCP_CONFIG`.
+`TERMINALMCP_CONFIG`, `TERMINALMCP_HTTP`, `TERMINALMCP_HTTP_HOST`,
+`TERMINALMCP_HTTP_PORT`, `TERMINALMCP_HTTP_PATH`, `TERMINALMCP_HTTP_CORS`.
 
 ### Opzioni da riga di comando
 
@@ -304,8 +414,12 @@ node bin/terminalmcp.js --help
 ```
 
 `--cwd`, `--shell`, `--config`, `--timeout-ms`, `--max-output-bytes`,
-`--login`, `--read-only`, `--allowed-root`, `--log-file`, e i comandi
-`--doctor`, `--print-config`, `--list-tools`.
+`--login`, `--read-only`, `--allowed-root`, `--log-file`.
+
+Per il trasporto HTTP: `--http`, `--host`, `--port`, `--path`, `--no-cors`,
+`--strict-sessions`, `--sse-replies`, `--max-body-bytes`.
+
+Comandi: `--doctor`, `--print-config`, `--list-tools`, `--help`, `--version`.
 
 ---
 
@@ -329,13 +443,16 @@ node bin/terminalmcp.js --help
 ## Test
 
 ```bash
-npm test              # 102 asserzioni: protocollo, exec, job, bulk, file, guardrail
-npm run test:smoke    # solo il grosso della suite
-npm run test:guards   # solo i guardrail
+npm test              # 150 asserzioni in tutto
+npm run test:smoke    # protocollo stdio, exec, job, bulk, file  (88)
+npm run test:guards   # guardrail: readOnly, allowedRoots, deny* (14)
+npm run test:http     # trasporto HTTP: streamable + legacy SSE   (48)
 ```
 
-I test avviano il server vero e ci parlano in MCP su stdio, quindi verificano
-anche l'handshake e il framing JSON-RPC.
+I test avviano il server vero e ci parlano in MCP — su stdio per la suite
+principale, su HTTP reale (sessioni, SSE, CORS, batch, 413) per quella del
+trasporto. Quindi verificano anche handshake, framing JSON-RPC e negoziazione
+di protocollo, non solo la logica interna.
 
 ---
 
@@ -343,7 +460,8 @@ anche l'handshake e il framing JSON-RPC.
 
 ```
 bin/terminalmcp.js   CLI: argomenti, --doctor, --print-config, avvio
-src/server.js        JSON-RPC 2.0 su stdio, metodi MCP, audit log
+src/server.js        JSON-RPC 2.0, metodi MCP, sessioni, audit log
+src/http.js          trasporto HTTP: Streamable HTTP + legacy HTTP+SSE
 src/tools.js         definizioni dei 9 tool e dispatch
 src/exec.js          spawn, timeout, kill dell'albero di processi, buffer
 src/jobs.js          registro dei job in background
@@ -360,8 +478,12 @@ skills/terminalmcp/  lo skill per il modello
 Note d'implementazione:
 
 - Il protocollo MCP è implementato a mano (JSON-RPC 2.0, messaggi separati da
-  newline) per restare a zero dipendenze: si clona e parte.
+  newline su stdio) per restare a zero dipendenze: si clona e parte.
 - `stdout` porta **solo** il protocollo; ogni diagnostica va su `stderr`.
+- Su HTTP la risposta è JSON normale quando il client accetta JSON — i client
+  mandano `Accept: application/json, text/event-stream` su ogni richiesta, e
+  avvolgere ogni risposta breve in un event stream non porta niente. Lo stream
+  SSE si usa quando il client non accetta JSON, o con `--sse-replies`.
 - Le richieste non si bloccano a vicenda: un `shell_exec` lungo non impedisce
   un `shell_job` in parallelo.
 - I timeout uccidono l'intero gruppo di processi (`process.kill(-pid)` su
@@ -385,7 +507,8 @@ Note d'implementazione:
 
 Feature già previste per i prossimi passi: step paralleli in `shell_bulk`,
 sessioni di shell persistenti (stato `cd`/`export` conservato), ricerca
-testuale su più file, watch di file, e trasporto HTTP/SSE oltre a stdio.
+testuale su più file, watch di file, e — se servisse — un token opzionale
+sul trasporto HTTP.
 
 ## Licenza
 

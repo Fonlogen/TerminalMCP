@@ -14,8 +14,8 @@ export const SERVER_VERSION = '0.1.0';
 
 // Protocol revisions we know how to speak. We echo the client's choice when we
 // recognise it, otherwise we answer with our newest.
-const SUPPORTED_PROTOCOLS = ['2024-11-05', '2025-03-26', '2025-06-18'];
-const LATEST_PROTOCOL = '2025-06-18';
+export const SUPPORTED_PROTOCOLS = ['2024-11-05', '2025-03-26', '2025-06-18'];
+export const LATEST_PROTOCOL = '2025-06-18';
 
 const JSONRPC = '2.0';
 const ERR = {
@@ -50,8 +50,16 @@ export class Server {
     }
   }
 
-  /** Handle one parsed JSON-RPC message. Returns a response, or null for notifications. */
-  async handle(msg) {
+  /**
+   * Handle one parsed JSON-RPC message. Returns a response, or null for
+   * notifications.
+   *
+   * `session` carries the per-connection protocol state. stdio has exactly one
+   * connection so it defaults to the server itself; the HTTP transport passes
+   * a distinct session object per client, since several clients may be talking
+   * to the same machine at different protocol revisions.
+   */
+  async handle(msg, session = this) {
     if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) {
       return errorResponse(null, ERR.invalidRequest, 'Request must be a JSON object');
     }
@@ -66,14 +74,14 @@ export class Server {
       switch (method) {
         case 'initialize': {
           const requested = params?.protocolVersion;
-          this.protocolVersion = SUPPORTED_PROTOCOLS.includes(requested) ? requested : LATEST_PROTOCOL;
-          this.clientInfo = params?.clientInfo ?? null;
+          session.protocolVersion = SUPPORTED_PROTOCOLS.includes(requested) ? requested : LATEST_PROTOCOL;
+          session.clientInfo = params?.clientInfo ?? null;
           log(
-            `initialize from ${this.clientInfo?.name ?? 'unknown client'} ` +
-            `(protocol ${requested ?? 'unspecified'} -> ${this.protocolVersion})`,
+            `initialize from ${session.clientInfo?.name ?? 'unknown client'} ` +
+            `(protocol ${requested ?? 'unspecified'} -> ${session.protocolVersion})`,
           );
           return result(id, {
-            protocolVersion: this.protocolVersion,
+            protocolVersion: session.protocolVersion,
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
             instructions:
@@ -84,7 +92,7 @@ export class Server {
 
         case 'notifications/initialized':
         case 'initialized':
-          this.initialized = true;
+          session.initialized = true;
           return null;
 
         case 'ping':

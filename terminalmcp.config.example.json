@@ -64,5 +64,27 @@
   "readOnly": false,
 
   // Append a JSONL audit line per tool call.
-  "logFile": null
+  "logFile": null,
+
+  // ---- Remote HTTP transport (default: off, stdio is used instead). ----
+  // There is NO authentication. Binding anything other than 127.0.0.1 gives
+  // a full shell on this machine to anyone who can reach the port.
+  "http": {
+    "enabled": false,
+    // 127.0.0.1 = local only. Use "0.0.0.0" to accept remote connections.
+    "host": "127.0.0.1",
+    "port": 8787,
+    // Streamable HTTP endpoint (MCP 2025-03-26 / 2025-06-18).
+    "path": "/mcp",
+    // Legacy HTTP+SSE endpoints (MCP 2024-11-05), served at the same time.
+    "ssePath": "/sse",
+    "messagePath": "/messages",
+    "maxBodyBytes": 33554432,
+    "cors": true,
+    // Reject requests carrying an unknown Mcp-Session-Id instead of serving them.
+    "strictSessions": false,
+    // Answer POSTs with an SSE stream even when the client would take JSON.
+    // Only needed behind a proxy that cuts idle responses during long commands.
+    "sseReplies": false
+  }
 }

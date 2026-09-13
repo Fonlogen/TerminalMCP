@@ -12,7 +12,14 @@ import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
 import { encodePng, pngInfo } from '../src/image.js';
-import { sessionType } from '../src/screen.js';
+import {
+  WINDOWS_SCRIPT,
+  explainWindowsFailure,
+  findWindowsError,
+  parseWindowsOk,
+  sessionType,
+  shotTempDir,
+} from '../src/screen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = join(ROOT, 'bin', 'terminalmcp.js');
@@ -25,13 +32,13 @@ function check(name, cond, detail = '') {
 }
 
 class Client {
-  constructor(cwd, extraArgs = []) {
+  constructor(cwd, extraArgs = [], extraEnv = {}) {
     this.id = 0;
     this.pending = new Map();
     this.buf = '';
     this.proc = spawn(process.execPath, [ENTRY, '--cwd', cwd, ...extraArgs], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, TERMINALMCP_CONFIG: join(cwd, 'no-such-config.json') },
+      env: { ...process.env, TERMINALMCP_CONFIG: join(cwd, 'no-such-config.json'), ...extraEnv },
     });
     this.proc.stdout.setEncoding('utf8');
     this.proc.stdout.on('data', (d) => this._onData(d));
@@ -176,6 +183,140 @@ async function main() {
 
       r = await c.call('screen', {});
       check('a missing action is reported', r.isError && /needs "action"/.test(r.text), r.text);
+    }
+
+    console.log('\n--- probe: the tool that says whether capture can work here ---');
+    {
+      const r = await c.call('screen', { action: 'probe' });
+      check('probe answers instead of failing', !r.isError, r.text);
+      check('probe names the session type', /session type:/.test(r.text), r.text);
+      if (session) {
+        check(
+          'probe ends in a verdict either way',
+          /Screenshots work on this machine\.|FAILED/.test(r.text),
+          r.text,
+        );
+      } else {
+        check('probe on a headless box points at the browser tool', /browser tool/.test(r.text), r.text);
+      }
+    }
+
+    if (process.platform === 'linux') {
+      console.log('\n--- probe on a Linux session, with no capture tool to be found ---');
+      // DISPLAY is enough to make the server believe there is an X11 session,
+      // which is what exercises the back-end selection inside probe on CI.
+      const x11 = await new Client(dir, ['--tools', 'core,screen'], { DISPLAY: ':99', WAYLAND_DISPLAY: '' }).init();
+      try {
+        const r = await x11.call('screen', { action: 'probe' });
+        check('probe reports the session it believes it is in', /session type: x11/.test(r.text), r.text);
+        check('probe lists the capture tools it found', /capture tools installed:/.test(r.text), r.text);
+        check('probe names the temp dir a capture goes through', /temp dir for captures:/.test(r.text), r.text);
+        check('probe still tries the real thing end to end', /end-to-end capture:/.test(r.text), r.text);
+        if (!/capture tools installed: (grim|maim|import|scrot|spectacle|gnome-screenshot|xfce4-screenshooter)/.test(r.text)) {
+          check('with nothing installed, probe says what to install', /install one of:/.test(r.text), r.text);
+        }
+        check('probe answers rather than erroring, even when capture cannot work', !r.isError, r.text);
+      } finally {
+        x11.close();
+      }
+    }
+
+    console.log('\n--- the Windows script reports failures the caller can act on ---');
+    {
+      // Here-strings only close on a terminator at column 0. Indent it while
+      // tidying the script and PowerShell swallows the rest of the file.
+      const badTerminator = WINDOWS_SCRIPT.split('\n').filter((l) => l.trim() === "'@" && l !== "'@");
+      check('every here-string terminator is at column 0', badTerminator.length === 0, JSON.stringify(badTerminator));
+
+      check('the output path parameter is spelled out', /\[string\]\$OutFile/.test(WINDOWS_SCRIPT));
+      check(
+        'no parameter is short enough to be ambiguous',
+        !/\[(string|int)\]\$(Out|W|H|X|Y|D|T)\b/.test(WINDOWS_SCRIPT),
+        (WINDOWS_SCRIPT.match(/\[(string|int)\]\$\w+/g) || []).join(' '),
+      );
+      check('the script has a probe mode', /'probe' \{/.test(WINDOWS_SCRIPT));
+      check('capture failures are caught around CopyFromScreen', /Fail 'copyfromscreen'/.test(WINDOWS_SCRIPT));
+
+      const stages = [...new Set([...WINDOWS_SCRIPT.matchAll(/Fail '([a-z]+)'/g)].map((m) => m[1]))];
+      check('the script reports several distinct failure stages', stages.length >= 7, stages.join(','));
+      const unexplained = stages.filter((stage) =>
+        /failed at stage/.test(explainWindowsFailure({ stage, type: 'Some.Type', message: 'something' })),
+      );
+      check('every stage the script can report has an explanation', unexplained.length === 0, unexplained.join(','));
+    }
+
+    console.log('\n--- reading that report back ---');
+    {
+      check('normal output carries no error', findWindowsError('OK\t0\t0\t8\t8\tC:\\Temp\\a.png\t120') === null);
+      check('a probe listing carries no error', findWindowsError('station\tWinSta0\ncopyfromscreen\tok') === null);
+
+      const err = findWindowsError(
+        'something noisy first\nERR\tcopyfromscreen\tSystem.ComponentModel.Win32Exception\t0x80004005\tThe handle is invalid',
+      );
+      check('the ERR line is found among other output', err !== null && err.stage === 'copyfromscreen', JSON.stringify(err));
+      check('the exception type is kept', err?.type === 'System.ComponentModel.Win32Exception', JSON.stringify(err));
+      check('the hresult is kept', err?.hresult === '0x80004005', JSON.stringify(err));
+      check('the message is kept', err?.message === 'The handle is invalid', JSON.stringify(err));
+
+      const denied = explainWindowsFailure(err);
+      check('an invalid handle is explained as the desktop, not as a bug', /interactive desktop/.test(denied), denied);
+      check('...naming the causes that produce it', /service|session 0|SSH/.test(denied), denied);
+      check('...telling the reader to run probe', /action: "probe"/.test(denied), denied);
+      check('...and offering the browser as the way out', /browser tool/.test(denied), denied);
+      check('...while still quoting what Windows said', /The handle is invalid/.test(denied), denied);
+
+      const odd = explainWindowsFailure({
+        stage: 'copyfromscreen',
+        type: 'System.OutOfMemoryException',
+        message: 'Out of memory',
+      });
+      check('an unrelated capture failure does not claim the desktop story', !/interactive desktop/.test(odd), odd);
+      check('...but still points at probe', /probe/.test(odd), odd);
+
+      const save = explainWindowsFailure({
+        stage: 'save',
+        type: 'System.Runtime.InteropServices.ExternalException',
+        message: 'A generic error occurred in GDI+.',
+      });
+      check('a failed save blames the destination, not the capture', /could not be written/.test(save), save);
+      check('...and names the thing to check', /TEMP/.test(save), save);
+
+      const assemblies = explainWindowsFailure({ stage: 'assemblies', type: 'System.IO.FileNotFoundException', message: 'System.Drawing' });
+      check('a missing assembly points at Windows PowerShell 5.1', /powershell\.exe/.test(assemblies), assemblies);
+
+      const min = explainWindowsFailure({ stage: 'minimized', message: "the window 'Git Bash' is minimized" });
+      check('a minimized window suggests activate', /activate: true/.test(min), min);
+
+      check('an unknown stage still says something', explainWindowsFailure({ stage: 'zzz' }).length > 20);
+    }
+
+    console.log('\n--- and reading a successful capture back ---');
+    {
+      const ok = parseWindowsOk('OK\t-1920\t0\t3840\t1080\tC:\\Users\\me\\AppData\\Local\\Temp\\a b.png\t482910');
+      check('the geometry is read back', ok?.width === 3840 && ok?.height === 1080 && ok?.x === -1920, JSON.stringify(ok));
+      check('the path the script resolved is read back, spaces and all', ok?.path === 'C:\\Users\\me\\AppData\\Local\\Temp\\a b.png', JSON.stringify(ok));
+      check('so is the size it wrote', ok?.bytes === 482910, JSON.stringify(ok));
+      check('an ERR line is not mistaken for success', parseWindowsOk('ERR\tsave\tX\t\tno') === null);
+      check('empty output is not mistaken for success', parseWindowsOk('') === null);
+    }
+
+    console.log('\n--- the capture temp dir is one .NET and Node agree on ---');
+    {
+      const win = (tmp, env = {}) => shotTempDir({ tmp, env, platform: 'win32' });
+      check('a drive-qualified TEMP is used as it is', win('C:\\Users\\me\\AppData\\Local\\Temp') === 'C:\\Users\\me\\AppData\\Local\\Temp');
+      check('a UNC TEMP is used as it is', win('\\\\nas\\share\\tmp') === '\\\\nas\\share\\tmp');
+      check(
+        'Git Bash\u2019s /tmp is replaced with LOCALAPPDATA',
+        win('/tmp', { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }) === 'C:\\Users\\me\\AppData\\Local\\Temp',
+        win('/tmp', { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }),
+      );
+      check(
+        '...or the profile, when LOCALAPPDATA is not set',
+        win('/tmp', { USERPROFILE: 'D:\\Users\\me' }) === 'D:\\Users\\me\\AppData\\Local\\Temp',
+        win('/tmp', { USERPROFILE: 'D:\\Users\\me' }),
+      );
+      check('...or the Windows directory as a last resort', /Temp$/.test(win('/tmp', {})), win('/tmp', {}));
+      check('other platforms are left alone', shotTempDir({ tmp: '/tmp', env: {}, platform: 'linux' }) === '/tmp');
     }
 
     console.log('\n--- allowedRoots applies to images too ---');

@@ -16,7 +16,7 @@ import path from 'node:path';
 import { PolicyError, resolveSafePath } from '../guards.js';
 import { imageMime, imageSize, imageTokens, toImageContent } from '../image.js';
 import { truncateMiddle } from '../format.js';
-import { capture, listDisplays, listWindows, sessionType } from '../screen.js';
+import { capture, listDisplays, listWindows, probe, sessionType } from '../screen.js';
 import { saveBuffer } from '../browser.js';
 
 export const TOOLS = [
@@ -26,7 +26,8 @@ export const TOOLS = [
       'Screenshot the desktop and look at images. shot captures everything, one monitor, ' +
       'one window found by title, or an exact rectangle — the image comes back viewable inline, ' +
       'so you can see what is on screen rather than guess. view shows any image file on disk ' +
-      '(png/jpeg/gif/webp). displays and windows list what there is to capture. ' +
+      '(png/jpeg/gif/webp). displays and windows list what there is to capture, and probe says ' +
+      'whether capture can work here at all — run it first if a shot fails. ' +
       'Scaled to max_width first, because an image costs tokens by area. For web pages prefer ' +
       'the browser tool: it needs no display and can capture a full scrolling page.',
     inputSchema: {
@@ -34,7 +35,7 @@ export const TOOLS = [
       properties: {
         action: {
           type: 'string',
-          enum: ['shot', 'view', 'displays', 'windows'],
+          enum: ['shot', 'view', 'displays', 'windows', 'probe'],
           description: 'What to do.',
         },
         mode: {
@@ -78,6 +79,9 @@ export function createHandlers({ cfg }) {
       const maxImageBytes = cfg.screenshots?.maxImageBytes ?? 5 * 1024 * 1024;
 
       switch (action) {
+        case 'probe':
+          return probe(cfg, { timeoutMs });
+
         case 'displays': {
           const displays = await listDisplays(cfg, { timeoutMs });
           const rows = displays.map(
@@ -197,7 +201,7 @@ export function createHandlers({ cfg }) {
         }
 
         default:
-          throw new Error(`Unknown screen action "${action}": shot | view | displays | windows`);
+          throw new Error(`Unknown screen action "${action}": shot | view | displays | windows | probe`);
       }
     },
   };

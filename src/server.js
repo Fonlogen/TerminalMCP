@@ -62,6 +62,7 @@ export class Server {
     this.handlers = toolset.handlers;
     this.toolGroups = toolset.groups;
     this.toolTokens = toolset.estimatedTokens;
+    this.toolBytes = toolset.bytes;
     this.initialized = false;
     this.clientInfo = null;
     this.protocolVersion = LATEST_PROTOCOL;

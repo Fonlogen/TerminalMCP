@@ -246,7 +246,7 @@ function mockDiscord() {
 
 // --------------------------------------------------------------- mock FiveM
 function mockFiveMHttp() {
-  const state = { bridgeCalls: [], txCalls: [], loggedIn: false };
+  const state = { bridgeCalls: [], txCalls: [], loggedIn: false, bridgeResource: 'terminalmcp_bridge' };
   const srv = createServer(async (req, res) => {
     const raw = await readBody(req);
     const url = new URL(req.url, 'http://x');
@@ -255,7 +255,7 @@ function mockFiveMHttp() {
     if (p === '/info.json') {
       return json(res, 200, {
         version: 7290,
-        resources: ['spawnmanager', 'chat', 'mapmanager', 'my-custom-resource'],
+        resources: ['spawnmanager', 'chat', 'mapmanager', 'my-custom-resource', state.bridgeResource],
         vars: { sv_projectName: 'Test Roleplay', sv_enforceGameBuild: '2802', onesync_enabled: 'true', sv_projectDesc: 'a test server' },
       });
     }
@@ -270,10 +270,14 @@ function mockFiveMHttp() {
     }
 
     // ---- the optional bridge resource
-    if (p.startsWith('/terminalmcp_bridge/')) {
-      const endpoint = p.slice('/terminalmcp_bridge/'.length);
+    // FiveM routes on the first path segment, which is the resource's FOLDER
+    // name — so the mock accepts whatever name it is given and records it,
+    // exactly as a real server would only answer on its own name.
+    const bridgeMatch = p.match(/^\/([^/]+)\/(ping|client_exec|client_lua|server_lua)$/);
+    if (bridgeMatch && bridgeMatch[1] === state.bridgeResource) {
+      const endpoint = bridgeMatch[2];
       const secret = req.headers['x-terminalmcp-secret'];
-      state.bridgeCalls.push({ endpoint, secret, body: raw.toString() });
+      state.bridgeCalls.push({ endpoint, secret, path: p, body: raw.toString() });
       if (secret !== BRIDGE_SECRET) return json(res, 401, { ok: false, error: 'bad or missing secret' });
       const body = raw.length ? JSON.parse(raw.toString()) : {};
       if (endpoint === 'ping') return json(res, 200, { ok: true, version: '0.1.0', resource: 'terminalmcp_bridge', players: 2 });
@@ -283,7 +287,7 @@ function mockFiveMHttp() {
       }
       if (endpoint === 'client_lua') return json(res, 200, { ok: true, result: { x: 1.5, y: 2.5, z: 3.5 } });
       if (endpoint === 'server_lua') return json(res, 200, { ok: true, result: 2 });
-      return json(res, 404, { ok: false, error: 'unknown endpoint' });
+      return json(res, 404, { ok: false, error: 'unknown endpoint', resource: state.bridgeResource });
     }
 
     // ---- txAdmin
@@ -660,7 +664,7 @@ async function main() {
       let r = await c.call('fivem', { action: 'status' });
       check('status works with no credentials at all', !r.isError && /Test Roleplay/.test(r.text), r.text);
       check('...and reports the player count', /2\/48/.test(r.text), r.text);
-      check('...and the resource count', /resources 4/.test(r.text), r.text);
+      check('...and the resource count', /resources 5/.test(r.text), r.text);
       check('...and says no RCON was involved', /no RCON password involved/.test(r.text), r.text);
 
       r = await c.call('fivem', { action: 'players' });
@@ -776,6 +780,87 @@ async function main() {
 
       r = await c.call('fivem', { action: 'server_lua', lua: '#GetPlayers()' });
       check('server_lua returns a value', !r.isError && /returned:\n2/.test(r.text), r.text);
+    }
+
+    console.log('\n--- fivem: the bridge URL, which is where the resource name goes wrong ---');
+    {
+      // FiveM routes an HTTP request by its first path segment, and that
+      // segment is the resource's folder name. Every way of getting that
+      // wrong produces the same blank 404, so each one gets a test.
+      const variants = [
+        ['bridge.url as a bare origin keeps the resource segment', { url: `http://127.0.0.1:${fmPort}` }],
+        ['bridge.url that already names the resource is not doubled', { url: `http://127.0.0.1:${fmPort}/terminalmcp_bridge` }],
+        ['a trailing slash makes no difference', { url: `http://127.0.0.1:${fmPort}/terminalmcp_bridge/` }],
+        ['no url at all falls back to host:port', {}],
+      ];
+      for (const [label, extra] of variants) {
+        const cfgPath = join(dir, `bridge-${Buffer.from(label).toString('hex').slice(0, 8)}.json`);
+        await writeFile(
+          cfgPath,
+          JSON.stringify({
+            plugins: ['fivem'],
+            pluginConfig: {
+              fivem: { host: '127.0.0.1', port: fmPort, bridge: { secret: BRIDGE_SECRET, ...extra } },
+            },
+          }),
+        );
+        const v = await new Client(dir, [], { TERMINALMCP_CONFIG: cfgPath }).init();
+        const r = await v.call('fivem', { action: 'bridge' });
+        check(label, /terminalmcp_bridge/.test(r.text) && !/not reachable/.test(r.text), r.text);
+        const last = fm.state.bridgeCalls[fm.state.bridgeCalls.length - 1];
+        check(`  ...and hit /terminalmcp_bridge/ping exactly`, last?.path === '/terminalmcp_bridge/ping', String(last?.path));
+        v.close();
+      }
+    }
+
+    console.log('\n--- fivem: a resource installed under another name ---');
+    {
+      // The name in fxmanifest.lua is metadata; FiveM uses the folder name.
+      // Renaming the folder must be a config change, not a dead end.
+      fm.state.bridgeResource = 'tmcp_bridge_renamed';
+
+      const wrongCfg = join(dir, 'bridge-wrong-name.json');
+      await writeFile(
+        wrongCfg,
+        JSON.stringify({
+          plugins: ['fivem'],
+          pluginConfig: { fivem: { host: '127.0.0.1', port: fmPort, bridge: { secret: BRIDGE_SECRET } } },
+        }),
+      );
+      const w = await new Client(dir, [], { TERMINALMCP_CONFIG: wrongCfg }).init();
+      let r = await w.call('fivem', { action: 'bridge' });
+      check('the wrong resource name reports what it tried', /terminalmcp_bridge/.test(r.text), r.text);
+      check('...names bridge.resource as the fix', /bridge\.resource/.test(r.text), r.text);
+      check('...and finds the real one in the server resource list', /tmcp_bridge_renamed/.test(r.text), r.text);
+
+      r = await w.call('fivem', { action: 'server_lua', lua: '1' });
+      check('a real action fails with the same three-cause explanation', r.isError && /RESOURCE name/.test(r.text), r.text);
+      w.close();
+
+      const rightCfg = join(dir, 'bridge-right-name.json');
+      await writeFile(
+        rightCfg,
+        JSON.stringify({
+          plugins: ['fivem'],
+          pluginConfig: {
+            fivem: {
+              host: '127.0.0.1', port: fmPort,
+              bridge: { secret: BRIDGE_SECRET, resource: 'tmcp_bridge_renamed' },
+            },
+          },
+        }),
+      );
+      const g = await new Client(dir, [], { TERMINALMCP_CONFIG: rightCfg }).init();
+      r = await g.call('fivem', { action: 'bridge' });
+      check('setting bridge.resource fixes it', !/not reachable/.test(r.text) && /tmcp_bridge_renamed/.test(r.text), r.text);
+      const last = fm.state.bridgeCalls[fm.state.bridgeCalls.length - 1];
+      check('...and the path uses the configured name', last?.path === '/tmcp_bridge_renamed/ping', String(last?.path));
+
+      r = await g.call('fivem', { action: 'server_lua', lua: '#GetPlayers()' });
+      check('...so the real actions work again', !r.isError && /returned:\n2/.test(r.text), r.text);
+      g.close();
+
+      fm.state.bridgeResource = 'terminalmcp_bridge';
     }
 
     console.log('\n--- fivem: the bridge is optional and says so ---');

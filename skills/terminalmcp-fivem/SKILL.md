@@ -88,6 +88,11 @@ fivem { action: "f8_exec", player: "3", command: "say hello" }
 Without it, that action explains how to install it. Do not promise the user it
 works before checking `fivem { action: "bridge" }`.
 
+If the bridge 404s, it is almost always the **resource name**: FiveM routes on
+the resource's folder name, not on the `name` in `fxmanifest.lua`. `bridge`
+reads the server's resource list when it cannot connect and names the likely
+candidate — the fix is `pluginConfig.fivem.bridge.resource`, not a reinstall.
+
 ## Getting values out, rather than reading logs
 
 When the bridge is installed, this is usually better than reading any console:

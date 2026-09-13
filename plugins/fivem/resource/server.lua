@@ -59,9 +59,27 @@ local function resolvePlayer(given)
   return nil, 'player ' .. tostring(given) .. ' is not connected'
 end
 
+--- Work out which endpoint was asked for, whatever shape the path arrives in.
+local function endpointOf(rawPath)
+  local path = rawPath or '/'
+  path = path:gsub('%?.*$', '')            -- drop any query string
+  path = path:gsub('^/+', ''):gsub('/+$', '')
+
+  -- FiveM normally hands over the path with the resource name already
+  -- stripped, so /myresource/ping arrives as /ping. Behind a reverse proxy
+  -- that rewrites, or if that ever changes, the name can still be on the
+  -- front — accept both rather than 404ing on a technicality.
+  local selfName = GetCurrentResourceName()
+  if path == selfName then
+    return ''
+  elseif path:sub(1, #selfName + 1) == selfName .. '/' then
+    return path:sub(#selfName + 2)
+  end
+  return path
+end
+
 SetHttpHandler(function(req, res)
-  -- The path arrives as /<endpoint>, with the resource name already stripped.
-  local endpoint = req.path:gsub('^/', ''):gsub('/$', '')
+  local endpoint = endpointOf(req.path)
 
   if req.headers['X-Terminalmcp-Secret'] ~= SECRET and req.headers['x-terminalmcp-secret'] ~= SECRET then
     return reply(res, 401, { ok = false, error = 'bad or missing secret' })
@@ -129,7 +147,14 @@ SetHttpHandler(function(req, res)
       return reply(res, 200, { ok = true, result = value })
     end
 
-    return reply(res, 404, { ok = false, error = 'unknown endpoint "' .. endpoint .. '"' })
+    -- Say which resource answered: if the caller expected a different name,
+    -- this is the line that tells them what to put in bridge.resource.
+    return reply(res, 404, {
+      ok = false,
+      error = 'unknown endpoint "' .. endpoint .. '"',
+      resource = GetCurrentResourceName(),
+      endpoints = { 'ping', 'client_exec', 'client_lua', 'server_lua' },
+    })
   end)
 end)
 

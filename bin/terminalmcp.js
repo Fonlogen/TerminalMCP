@@ -92,6 +92,9 @@ Options:
                            ops      core + search, fs, archive, sys, net (~8.5k)
                            web      core + browser, screen, net, search, fs (~10.6k)
                          Or a list: --tools core,git,search  /  --tools all,-watch,-archive
+                         Groups are sent in the order you name them. That matters because
+                         some clients cap how much tool schema they accept and drop the
+                         tail without saying so — list what you need most, first.
                          Groups: ${GROUP_NAMES.join(', ')}
   -h, --help             this text
   -v, --version          print the version
@@ -255,6 +258,31 @@ function onPathSync(name) {
   return false;
 }
 
+/**
+ * A large toolset is silently lossy on some clients.
+ *
+ * Observed in the wild: a client that accepted the first 26 tools and dropped
+ * the remaining three without a word — the server had sent all of them, the
+ * transport was fine, and nothing anywhere said otherwise. The only signal was
+ * that the missing ones were the tail of the list. Since there is no way to
+ * detect this from the server side, say it up front instead.
+ */
+function warnIfToolsetIsLarge(server) {
+  const kb = server.toolBytes / 1024;
+  if (kb < 40) return;
+  process.stderr.write(
+    `[terminalmcp] NOTE: ${server.tools.length} tools, ${kb.toFixed(1)} KB of schema ` +
+    `(~${server.toolTokens} tokens) on every request.\n` +
+    '[terminalmcp]       Some MCP clients cap how much tool schema they accept and drop the\n' +
+    '[terminalmcp]       rest silently — one has been seen stopping at about 41 KB. If tools\n' +
+    '[terminalmcp]       go missing in your client, that is where to look: compare its list\n' +
+    '[terminalmcp]       against --list-tools (or GET /health over HTTP).\n' +
+    '[terminalmcp]       Trim with --tools, e.g. --tools core,screen or --tools all,-browser.\n' +
+    '[terminalmcp]       Groups are sent in the order you name them, so what you list first\n' +
+    '[terminalmcp]       is what survives a client that truncates.\n',
+  );
+}
+
 function doctor(cfg, plugins = { groups: {}, loaded: [], errors: [] }) {
   const toolset = buildToolset(cfg.tools, { cfg, jobs: { list: () => [] } }, plugins.groups);
   const shell = (() => {
@@ -285,7 +313,9 @@ function doctor(cfg, plugins = { groups: {}, loaded: [], errors: [] }) {
     `screen      ${describeScreen()}`,
     `images      scaled to <=${cfg.screenshots.maxWidth}px wide, saved under ${cfg.screenshots.dir || '<cwd>/.terminalmcp/shots'}`,
     `profile     ${cfg.tools} -> ${toolset.groups.join(', ')}`,
-    `tools       ${toolset.tools.length} tools, ~${toolset.estimatedTokens} tokens of schema per request`,
+    `tools       ${toolset.tools.length} tools, ~${toolset.estimatedTokens} tokens ` +
+      `(${(toolset.bytes / 1024).toFixed(1)} KB) of schema per request` +
+      `${toolset.bytes / 1024 >= 40 ? '  <-- large; some clients silently drop the tail (see --help)' : ''}`,
     ...describeGroups(toolset.groups, plugins.groups).map(
       (g) =>
         `  ${g.active ? '[x]' : '[ ]'} ${g.name.padEnd(9)} ~${String(g.estimatedTokens).padStart(5)} tok  ` +
@@ -350,6 +380,7 @@ async function main() {
   }
 
   const server = new Server(cfg, plugins);
+  warnIfToolsetIsLarge(server);
   log(
     `v${SERVER_VERSION} ready — shell=${cfg.shell} cwd=${cfg.cwd} ` +
     `tools=${server.tools.length} (${server.toolGroups.join(',')}, ~${server.toolTokens} tok)` +

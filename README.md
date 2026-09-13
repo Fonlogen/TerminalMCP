@@ -13,7 +13,7 @@ fraction of the tokens a naive tool server burns.
 [![CI](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2018-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success)](package.json)
-[![Tests](https://img.shields.io/badge/tests-724%20assertions-success)](test)
+[![Tests](https://img.shields.io/badge/tests-743%20assertions-success)](test)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-635BFF)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -606,6 +606,13 @@ Read [its README](plugins/fivem/resource/README.md) before installing it. It
 grants arbitrary Lua execution on your server and on connected clients to
 whoever holds its secret. That is the feature, and it is not for every server.
 
+One thing to know because it is the easiest way to lose an afternoon: FiveM
+routes an HTTP request to a resource by the **first path segment, which is the
+resource's folder name** — not the `name` in `fxmanifest.lua`. If you install
+the bridge under a different folder name, set `bridge.resource` to it.
+`fivem { action: "bridge" }` reads the server's own resource list when it
+cannot connect, and tells you which name to use.
+
 ### `discord`
 
 Works with a bot token, a webhook URL, or both. A webhook needs no application
@@ -1011,14 +1018,14 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 724 assertions
-npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (97)
+npm test                 # 743 assertions
+npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: view, guards, honest failure     (30)
-npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (129)
+npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (144)
 npm run test:browser     # a real browser: 30 actions end to end            (114)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```
@@ -1050,6 +1057,42 @@ poll open until a message arrives. It asserts the things that would be
 embarrassing to get wrong: that a token never appears in an error, that
 `readOnly` refuses exactly the outward-facing actions, and that an allow-list
 refusal happens *before* anything goes out on the wire.
+
+---
+
+## When tools go missing in your client
+
+The server logs what it exposes; the client decides what it keeps. Those two
+numbers can disagree, and nothing in the protocol reports it.
+
+Seen in the wild: a server reporting `tools=29` while the client listed 26.
+The three missing ones were the **last three in the list** — the tail had been
+dropped silently, at around 41 KB of accumulated schema. The server was sending
+all of them, over a working transport, as valid JSON.
+
+So when a tool you expect is not there:
+
+```bash
+node bin/terminalmcp.js --list-tools     # what the server exposes
+curl localhost:8787/health               # the same, over HTTP
+```
+
+If those show the tool and your client does not, the client dropped it. Two
+things fix it, both about making the list smaller:
+
+```bash
+--tools all,-browser        # drop the biggest single tool (~6 KB)
+--tools core,screen,fivem   # or name only what this session needs
+```
+
+**Groups are sent in the order you name them.** `--tools screen,git` puts
+`screen` first, so it survives a client that truncates; `all` and the bundles
+keep registry order. That ordering is the only lever you have over which tools
+live through a cap you cannot see, so it belongs to you rather than to the
+registry.
+
+The server prints a note at startup once the schema passes 40 KB, so this is
+signposted rather than discovered.
 
 ---
 

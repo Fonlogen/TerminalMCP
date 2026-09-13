@@ -460,6 +460,45 @@ async function main() {
       const trimmedNames = ((await trimmed.send('tools/list', {})).result?.tools ?? []).map((t) => t.name);
       check('removals in a profile work', trimmedNames.length === 26 && !trimmedNames.includes('watch') && !trimmedNames.includes('archive'), trimmedNames.join(','));
       trimmed.close();
+
+      // Some MCP clients cap how much tool schema they accept and drop the
+      // tail without saying so, which makes the ORDER of tools/list the only
+      // lever the operator has over what survives. So it has to be the order
+      // they asked for.
+      const ordered = new Client(dir, ['--tools', 'screen,git']);
+      await ordered.send('initialize', {
+        protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'profile-test', version: '1' },
+      });
+      const orderedNames = ((await ordered.send('tools/list', {})).result?.tools ?? []).map((t) => t.name);
+      check(
+        'an explicit profile keeps the order it was written in',
+        orderedNames.indexOf('screen') < orderedNames.indexOf('git'),
+        orderedNames.join(','),
+      );
+      check(
+        'always-on groups still come first, whatever the order',
+        orderedNames[0] === 'shell_exec' && orderedNames.includes('vars'),
+        orderedNames.join(','),
+      );
+      ordered.close();
+
+      const reversed = new Client(dir, ['--tools', 'git,screen']);
+      await reversed.send('initialize', {
+        protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'profile-test', version: '1' },
+      });
+      const reversedNames = ((await reversed.send('tools/list', {})).result?.tools ?? []).map((t) => t.name);
+      check(
+        'naming them the other way round reverses them',
+        reversedNames.indexOf('git') < reversedNames.indexOf('screen'),
+        reversedNames.join(','),
+      );
+      reversed.close();
+
+      check(
+        '"all" is unchanged: registry order, browser and screen last',
+        names.slice(-2).join(',') === 'browser,screen',
+        names.slice(-4).join(','),
+      );
     }
 
   } finally {

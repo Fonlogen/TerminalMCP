@@ -120,9 +120,17 @@ export function resolveGroups(spec, groupMap = GROUPS) {
 
   for (const g of pluginNames) selected.add(g);
   for (const g of removed) selected.delete(g);
-  for (const g of names) if (groupMap[g].always) selected.add(g);
 
-  return names.filter((g) => selected.has(g));
+  // Order matters more than it looks. Some MCP clients cap how much tool
+  // schema they will accept and silently drop whatever is past the cap — so
+  // the tail of this list is the part most likely to go missing. A spec that
+  // names groups explicitly therefore keeps the caller's order, which is the
+  // only lever they have over what survives. `all` and the bundles still come
+  // out in registry order, so nothing changes for the default.
+  const always = names.filter((g) => groupMap[g].always);
+  for (const g of always) selected.delete(g);
+  const rest = [...selected];
+  return [...always, ...rest];
 }
 
 /**

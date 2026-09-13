@@ -69,6 +69,24 @@ bridge is missing, and everything else carries on.
    fivem { action: "bridge" }
    ```
 
+### If it 404s, it is the folder name
+
+FiveM routes an HTTP request to a resource by the **first path segment**, and
+that segment is the resource's **folder name**. The `name` line in
+`fxmanifest.lua` is metadata and is not used for routing.
+
+So if you installed this as `resources/[terminalmcp]/mcp_bridge/`, the URL is
+`/mcp_bridge/ping`, and TerminalMCP needs to be told:
+
+```json
+"bridge": { "resource": "mcp_bridge", "secret": "env:FIVEM_BRIDGE_SECRET" }
+```
+
+`fivem { action: "bridge" }` will read the server's own resource list when it
+cannot connect and suggest the right name. The `[terminalmcp]` part is a
+category folder — square-bracketed directories group resources and are not
+part of the name.
+
 ## What it adds
 
 ```

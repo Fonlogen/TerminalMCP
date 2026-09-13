@@ -146,7 +146,9 @@ export function describe({ settings, secret }) {
     bits.push(`txAdmin ${tx.url}${has.length ? ` (${has.join(' + ')})` : ' (no credentials)'}`);
   }
   const bridge = settings.bridge ?? {};
-  if (secret(bridge.secret ?? 'env:FIVEM_BRIDGE_SECRET')) bits.push('bridge configured');
+  if (secret(bridge.secret ?? 'env:FIVEM_BRIDGE_SECRET')) {
+    bits.push(`bridge configured (resource "${bridge.resource ?? 'terminalmcp_bridge'}")`);
+  }
   return bits.join(', ');
 }
 
@@ -164,6 +166,8 @@ export function createHandlers({ cfg, settings, redactor, secret }) {
 
   const bridge = settings.bridge ?? {};
   const bridgeSecret = secret(bridge.secret ?? 'env:FIVEM_BRIDGE_SECRET');
+  // The resource's folder name on the server, which is what FiveM routes on.
+  const bridgeResource = String(bridge.resource ?? 'terminalmcp_bridge').replace(/^\/+|\/+$/g, '');
 
   const allowCommands = compile(settings.allowCommands, 'allowCommands');
   const denyCommands = compile(settings.denyCommands, 'denyCommands');
@@ -353,9 +357,24 @@ export function createHandlers({ cfg, settings, redactor, secret }) {
   }
 
   // -------------------------------------------------------------- bridge
+  /**
+   * Build the bridge's base URL.
+   *
+   * FiveM routes an HTTP request to a resource by the FIRST path segment, and
+   * that segment is the resource's **folder name** — not the `name` field in
+   * fxmanifest.lua, which is only metadata. Getting it wrong 404s every
+   * endpoint, and nothing in the reply says why.
+   *
+   * `bridge.url` is accepted in either of the two forms someone would
+   * reasonably write: the server's origin, or the origin with the resource
+   * segment already on it. Appending blindly produced
+   * `…/terminalmcp_bridge/terminalmcp_bridge` for the second, and not
+   * appending at all lost the segment for the first.
+   */
   function bridgeUrl() {
-    const explicit = bridge.url ? bridge.url.replace(/\/+$/, '') : null;
-    return explicit ?? `http://${host}:${port}/terminalmcp_bridge`;
+    const base = (bridge.url ? String(bridge.url) : `http://${host}:${port}`).replace(/\/+$/, '');
+    const lastSegment = base.split('/').pop();
+    return lastSegment === bridgeResource ? base : `${base}/${bridgeResource}`;
   }
 
   async function bridgeCall(endpoint, body, { timeoutMs = 15000 } = {}) {
@@ -379,9 +398,13 @@ export function createHandlers({ cfg, settings, redactor, secret }) {
     });
     if (status === 404) {
       throw new Error(
-        `The bridge did not answer at ${bridgeUrl()}/${endpoint} (HTTP 404). ` +
-        'Is terminalmcp_bridge started? Check the server console for "terminalmcp_bridge" and ' +
-        'confirm the resource name matches the URL path.',
+        `The bridge did not answer at ${bridgeUrl()}/${endpoint} (HTTP 404). Three things cause this:\n` +
+        `  1. The resource is not running. Check the server console, or run \`ensure ${bridgeResource}\`.\n` +
+        `  2. It is installed under a different folder name. FiveM routes on the RESOURCE name — the ` +
+        `folder — not the name in fxmanifest.lua. This call used "${bridgeResource}"; set ` +
+        'pluginConfig.fivem.bridge.resource to the real one.\n' +
+        `  3. bridge.url points somewhere else. It may be the server origin or the origin plus the ` +
+        `resource segment; either is fine, and this resolved to ${bridgeUrl()}.`,
       );
     }
     if (status === 401) throw new Error('The bridge rejected the secret: terminalmcp_secret in server.cfg does not match the configured one');
@@ -537,12 +560,34 @@ export function createHandlers({ cfg, settings, redactor, secret }) {
         }
 
         case 'bridge': {
-          const out = await bridgeCall('ping', {}).catch((err) => ({ error: err.message }));
-          if (out.error) return `bridge not reachable\n${out.error}`;
-          return (
-            `bridge ${out.version ?? '?'} on ${bridgeUrl()}\n` +
-            `resource: ${out.resource ?? 'terminalmcp_bridge'}, ${out.players ?? '?'} player(s) connected`
-          );
+          try {
+            const out = await bridgeCall('ping', {});
+            // The resource reports its own real name, so a path rewritten by a
+            // proxy shows up here instead of as a mystery 404 later.
+            const mismatch =
+              out.resource && out.resource !== bridgeResource
+                ? `\nnote: it calls itself "${out.resource}" but the URL used "${bridgeResource}". ` +
+                  'Something is rewriting the path; set bridge.resource if calls start failing.'
+                : '';
+            return (
+              `bridge ${out.version ?? '?'} on ${bridgeUrl()}\n` +
+              `resource: ${out.resource ?? bridgeResource}, ${out.players ?? '?'} player(s) connected${mismatch}`
+            );
+          } catch (err) {
+            // A wrong resource name is the usual cause, and the server will
+            // happily list what it actually has — so name the candidates
+            // instead of leaving the user to guess.
+            const candidates = await serverJson(a, 'info.json')
+              .then((info) => (info.resources ?? []).filter((r) => /mcp|bridge/i.test(r)))
+              .catch(() => []);
+            return (
+              `bridge not reachable\n${err.message}` +
+              (candidates.length
+                ? `\n\nThe server does have: ${candidates.join(', ')}. If one of those is the bridge, ` +
+                  'set pluginConfig.fivem.bridge.resource to that exact name.'
+                : '')
+            );
+          }
         }
 
         // ----------------------------------------------------------- txAdmin

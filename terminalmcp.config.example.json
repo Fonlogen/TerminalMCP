@@ -126,7 +126,17 @@
       // The optional in-game bridge resource. Read
       // plugins/fivem/resource/README.md before installing it: it grants
       // arbitrary Lua execution on the server and on clients.
-      "bridge": { "url": null, "secret": "env:FIVEM_BRIDGE_SECRET" }
+      "bridge": {
+        // The resource's FOLDER name on the server. FiveM routes HTTP by that
+        // name, and it is not the `name` in fxmanifest.lua — if you renamed
+        // the folder, put the new name here or every call 404s.
+        "resource": "terminalmcp_bridge",
+        // Only needed when the bridge is not on host:port above (a reverse
+        // proxy, a different interface). Either the origin or the origin plus
+        // the resource segment works.
+        "url": null,
+        "secret": "env:FIVEM_BRIDGE_SECRET"
+      }
     },
     "discord": {
       // A bot token reads and writes; a webhook URL can only post. Either

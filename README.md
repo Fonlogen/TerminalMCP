@@ -13,7 +13,7 @@ fraction of the tokens a naive tool server burns.
 [![CI](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2018-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success)](package.json)
-[![Tests](https://img.shields.io/badge/tests-724%20assertions-success)](test)
+[![Tests](https://img.shields.io/badge/tests-739%20assertions-success)](test)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-635BFF)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -606,6 +606,13 @@ Read [its README](plugins/fivem/resource/README.md) before installing it. It
 grants arbitrary Lua execution on your server and on connected clients to
 whoever holds its secret. That is the feature, and it is not for every server.
 
+One thing to know because it is the easiest way to lose an afternoon: FiveM
+routes an HTTP request to a resource by the **first path segment, which is the
+resource's folder name** — not the `name` in `fxmanifest.lua`. If you install
+the bridge under a different folder name, set `bridge.resource` to it.
+`fivem { action: "bridge" }` reads the server's own resource list when it
+cannot connect, and tells you which name to use.
+
 ### `discord`
 
 Works with a bot token, a webhook URL, or both. A webhook needs no application
@@ -1011,14 +1018,14 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 724 assertions
+npm test                 # 739 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (97)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: view, guards, honest failure     (30)
-npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (129)
+npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (144)
 npm run test:browser     # a real browser: 30 actions end to end            (114)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```

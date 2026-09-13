@@ -5,13 +5,15 @@
 // failure) always runs, and the actual capture runs only when there is a
 // graphical session to capture.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
 import { encodePng, pngInfo } from '../src/image.js';
+import { describeRunFailure, runFailed } from '../src/exec.js';
 import {
   WINDOWS_SCRIPT,
   explainWindowsFailure,
@@ -99,6 +101,38 @@ function fixtureImage(w, h) {
     }
   }
   return encodePng({ width: w, height: h, rgba });
+}
+
+function onPathSync(name) {
+  return (process.env.PATH || '').split(':').some((d) => d && existsSync(join(d, name)));
+}
+
+/**
+ * A throwaway X display, so the capture commands themselves can be exercised
+ * rather than only the logic around them. Returns null when the machine has no
+ * Xvfb — a missing tool is a missing tool, not a failing test.
+ */
+async function startXvfb() {
+  if (process.platform !== 'linux' || !onPathSync('Xvfb') || !onPathSync('xdpyinfo')) return null;
+  for (let n = 90; n <= 99; n++) {
+    const display = `:${n}`;
+    // Xvfb refuses to start on a display whose lock file exists, even a stale
+    // one left behind by a server that was killed rather than asked to stop.
+    if (existsSync(`/tmp/.X${n}-lock`) || existsSync(`/tmp/.X11-unix/X${n}`)) continue;
+    const proc = spawn('Xvfb', [display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], {
+      stdio: 'ignore',
+      detached: true,
+    });
+    proc.unref();
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      const probe = spawnSync('xdpyinfo', [], { env: { ...process.env, DISPLAY: display }, stdio: 'ignore' });
+      if (probe.status === 0) return { display, proc, width: 1280, height: 800 };
+      if (proc.exitCode !== null) break;
+    }
+    try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+  }
+  return null;
 }
 
 async function main() {
@@ -334,6 +368,100 @@ async function main() {
       } finally {
         jailed.close();
       }
+    }
+
+    console.log('\n--- against a real X display: the capture commands themselves ---');
+    {
+      const x = await startXvfb();
+      if (!x) {
+        console.log('  (skipped: no Xvfb on this machine)');
+      } else {
+        const env = { DISPLAY: x.display, WAYLAND_DISPLAY: '' };
+        const shots = join(dir, 'xvfb-shots');
+        const c2 = await new Client(dir, ['--tools', 'core,screen', '--shots-dir', shots], env).init();
+        // A window to aim at, if the machine has one to give.
+        const win = onPathSync('xmessage')
+          ? spawn('xmessage', ['-geometry', '400x200+100+80', 'TerminalMCP capture test'], {
+              env: { ...process.env, DISPLAY: x.display },
+              stdio: 'ignore',
+              detached: true,
+            })
+          : null;
+        if (win) await new Promise((r) => setTimeout(r, 1200));
+        try {
+          let r = await c2.call('screen', { action: 'displays' });
+          check('displays succeeds against a real display', !r.isError, r.text);
+          check('...and reports its size', /1280x800/.test(r.text), r.text);
+
+          r = await c2.call('screen', { action: 'shot', save: false });
+          check('a whole-screen shot succeeds', !r.isError, r.text.slice(0, 300));
+          check('...and comes back as an image, not a description', r.images?.length === 1, r.text);
+          check('...of the whole screen', /1280x800/.test(r.text), r.text);
+
+          r = await c2.call('screen', { action: 'shot', mode: 'region', x: 10, y: 10, width: 200, height: 120, save: false });
+          check('a region shot succeeds', !r.isError, r.text.slice(0, 300));
+          const region = r.images?.[0] ? pngInfo(Buffer.from(r.images[0].data, 'base64')) : null;
+          check('...and is exactly the rectangle asked for', region?.width === 200 && region?.height === 120, JSON.stringify(region));
+
+          r = await c2.call('screen', { action: 'shot', mode: 'display', display: '1', save: false });
+          check('capturing one display succeeds', !r.isError, r.text.slice(0, 300));
+
+          r = await c2.call('screen', { action: 'shot', mode: 'region', x: 0, y: 0, width: 64, height: 48 });
+          check('a shot saves where the config says', !r.isError && r.text.includes(shots), r.text);
+          const savedPath = (r.text.match(/saved (\S+\.png)/) || [])[1];
+          check('...and the file is really there', savedPath ? (await stat(savedPath).catch(() => null))?.size > 0 : false, String(savedPath));
+          const onDisk = savedPath ? pngInfo(await readFile(savedPath)) : null;
+          check('...at full resolution, not the scaled copy', onDisk?.width === 64 && onDisk?.height === 48, JSON.stringify(onDisk));
+
+          r = await c2.call('screen', { action: 'view', path: savedPath });
+          check('and the saved capture can be viewed back', !r.isError && r.images?.length === 1, r.text);
+
+          r = await c2.call('screen', { action: 'probe' });
+          check('probe confirms capture works here', /8x8 end-to-end capture: ok/.test(r.text), r.text);
+
+          if (win) {
+            r = await c2.call('screen', { action: 'windows' });
+            check('a window on a bare X session is still found', /xmessage/.test(r.text), r.text);
+
+            r = await c2.call('screen', { action: 'shot', mode: 'window', window: 'xmessage', save: false });
+            check('capturing that window succeeds', !r.isError, r.text.slice(0, 300));
+            const shot = r.images?.[0] ? pngInfo(Buffer.from(r.images[0].data, 'base64')) : null;
+            check('...and is the size of the window', shot?.width === 400 && shot?.height === 200, JSON.stringify(shot));
+          }
+
+          check('nothing crashed the server', !/handler crash|uncaught/.test(c2.stderr), c2.stderr.slice(-300));
+        } finally {
+          c2.close();
+          if (win) { try { process.kill(-win.pid, 'SIGKILL'); } catch { try { win.kill('SIGKILL'); } catch { /* gone */ } } }
+          // SIGTERM, not SIGKILL: Xvfb removes its own lock file on a clean
+          // exit, and a stale lock makes the next run skip this display.
+          try { x.proc.kill('SIGTERM'); } catch { /* gone */ }
+        }
+      }
+    }
+
+    console.log('\n--- a run is judged by exitCode, which is the property that exists ---');
+    {
+      // This is the shape that broke every capture path: `r.code` is undefined
+      // on a run, so `r.code !== 0` was always true and every success was
+      // reported as a failure carrying the output it should have returned.
+      const cfg = { cwd: process.cwd(), env: {}, timeoutMs: 10000, maxBufferBytes: 1 << 20, allowedRoots: [] };
+      const { runArgv } = await import('../src/exec.js');
+
+      const ok = await runArgv(cfg, { file: process.execPath, args: ['-e', 'console.log("out")'] });
+      check('a run carries exitCode', ok.exitCode === 0, JSON.stringify(Object.keys(ok).slice(0, 20)));
+      check('a run has no "code" to read by mistake', ok.code === undefined);
+      check('a successful run is not a failure', runFailed(ok) === false);
+
+      const bad = await runArgv(cfg, { file: process.execPath, args: ['-e', 'console.error("boom"); process.exit(3)'] });
+      check('a non-zero exit is a failure', runFailed(bad) === true);
+      const why = describeRunFailure(bad, 'node');
+      check('...and says which code it exited with', /exited with code 3/.test(why), why);
+      check('...with stderr labelled, not pasted in raw', /stderr: boom/.test(why), why);
+
+      const missing = await runArgv(cfg, { file: 'definitely-not-a-real-program-xyz', args: [] });
+      check('a program that does not exist is a failure', runFailed(missing) === true);
+      check('...and says so', /could not be started|not found/.test(describeRunFailure(missing)), describeRunFailure(missing));
     }
 
     if (!session) {

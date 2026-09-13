@@ -20,7 +20,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { runArgv } from './exec.js';
+import { describeRunFailure, runArgv, runFailed } from './exec.js';
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -549,9 +549,11 @@ async function runWindows(cfg, args, timeoutMs) {
   // exception type, which is what makes the cause nameable.
   const reported = findWindowsError(r.stdout);
   if (reported) throw new Error(explainWindowsFailure(reported));
-  if (r.code !== 0) {
+  if (runFailed(r)) {
     throw new Error(
-      `Screen capture failed: ${(r.stderr || r.stdout || `exit ${r.code}`).trim().split('\n').slice(0, 4).join(' ')}`,
+      `${describeRunFailure(r, 'PowerShell')}\n` +
+      'The script reports its own failures as an ERR line and printed none, so this ' +
+      'came from outside it. Run screen { action: "probe" } for the whole picture.',
     );
   }
   return r.stdout;
@@ -731,14 +733,14 @@ export async function listWindows(cfg, { timeoutMs = 15000 } = {}) {
       'end tell\n' +
       'return out';
     const r = await runArgv(cfg, { file: 'osascript', args: ['-e', script], timeoutMs });
-    if (r.code !== 0) {
+    if (runFailed(r)) {
       const denied = /not allowed assistive|1743|accessibility/i.test(r.stderr || '');
       throw new Error(
         denied
           ? 'macOS refused the window list: this process needs Accessibility permission. ' +
             'System Settings → Privacy & Security → Accessibility, and add the app running this server ' +
             '(Terminal, iTerm, VS Code…). Region capture with x/y/width/height needs no permission.'
-          : `Could not list windows: ${(r.stderr || r.stdout).trim().split('\n')[0]}`,
+          : `Could not list windows: ${describeRunFailure(r, 'osascript')}`,
       );
     }
     return r.stdout
@@ -796,7 +798,7 @@ export async function listWindows(cfg, { timeoutMs = 15000 } = {}) {
   // X11
   if (onPath('wmctrl')) {
     const r = await runArgv(cfg, { file: 'wmctrl', args: ['-lGp'], timeoutMs });
-    return r.stdout
+    const rows = r.stdout
       .trim()
       .split(/\r?\n/)
       .filter(Boolean)
@@ -814,6 +816,11 @@ export async function listWindows(cfg, { timeoutMs = 15000 } = {}) {
           title: parts.slice(8).join(' '),
         };
       });
+    if (rows.length) return rows;
+    // wmctrl only knows what the window manager publishes in _NET_CLIENT_LIST.
+    // A bare X session, or a WM without EWMH, leaves it with nothing to read —
+    // which is not the same as there being no windows. xdotool asks the X
+    // server itself, so try that before believing the desktop is empty.
   }
   if (onPath('xdotool')) {
     const r = await runArgv(cfg, {
@@ -926,13 +933,13 @@ export async function capture(cfg, { mode = 'screen', display = null, window: wi
       }
       args.push(out);
       const r = await runArgv(cfg, { file: 'screencapture', args, timeoutMs });
-      if (r.code !== 0) {
+      if (runFailed(r)) {
         const denied = /not authorized|permission/i.test(`${r.stderr}${r.stdout}`);
         throw new Error(
           denied
             ? 'macOS refused the capture: grant Screen Recording permission in ' +
               'System Settings → Privacy & Security → Screen Recording to the app running this server.'
-            : `screencapture failed: ${(r.stderr || r.stdout || `exit ${r.code}`).trim()}`,
+            : describeRunFailure(r, 'screencapture'),
         );
       }
       tool = 'screencapture';
@@ -940,7 +947,11 @@ export async function capture(cfg, { mode = 'screen', display = null, window: wi
       const installed = LINUX_CAPTURERS.map((c) => c.name).filter((n) => onPath(n));
       // A window or a display can always be done as a region, given geometry,
       // so fall back to that rather than refusing.
-      let effective = mode;
+      //
+      // `screen` is this tool's word for the whole desktop; `full` is what the
+      // back ends call the same thing. Translate once, here, rather than
+      // asking a capturer for a capability none of them has ever had.
+      let effective = mode === 'screen' ? 'full' : mode;
       let rect = region;
       if (mode === 'window') {
         const win = await findWindow(cfg, windowSpec, timeoutMs);
@@ -951,7 +962,7 @@ export async function capture(cfg, { mode = 'screen', display = null, window: wi
             args: direct.tool.window(win.id, out).slice(1),
             timeoutMs,
           });
-          if (r.code !== 0) throw new Error(`${direct.tool.name} failed: ${(r.stderr || r.stdout).trim().split('\n')[0]}`);
+          if (runFailed(r)) throw new Error(describeRunFailure(r, direct.tool.name));
           const buf = await readFile(out);
           await unlink(out).catch(() => {});
           return { buf, tool: direct.tool.name, mode, detail: `window "${win.title}" (${win.width}x${win.height})` };
@@ -966,7 +977,7 @@ export async function capture(cfg, { mode = 'screen', display = null, window: wi
         if (byName.tool && d.name) {
           const argv = byName.tool.display(d.name, out);
           const r = await runArgv(cfg, { file: argv[0], args: argv.slice(1), timeoutMs });
-          if (r.code !== 0) throw new Error(`${byName.tool.name} failed: ${(r.stderr || r.stdout).trim().split('\n')[0]}`);
+          if (runFailed(r)) throw new Error(describeRunFailure(r, byName.tool.name));
           const buf = await readFile(out);
           await unlink(out).catch(() => {});
           return { buf, tool: byName.tool.name, mode, detail: `display ${d.name}` };
@@ -985,9 +996,7 @@ export async function capture(cfg, { mode = 'screen', display = null, window: wi
       }
       const argv = effective === 'region' ? chosen.tool.region(rect, out) : chosen.tool.full(out);
       const r = await runArgv(cfg, { file: argv[0], args: argv.slice(1), timeoutMs });
-      if (r.code !== 0) {
-        throw new Error(`${chosen.tool.name} failed: ${(r.stderr || r.stdout || `exit ${r.code}`).trim().split('\n')[0]}`);
-      }
+      if (runFailed(r)) throw new Error(describeRunFailure(r, chosen.tool.name));
       tool = chosen.tool.name;
     }
 

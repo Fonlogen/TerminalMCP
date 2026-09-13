@@ -1044,13 +1044,13 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 788 assertions
+npm test                 # 812 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
-npm run test:screen      # the screen tool: view, probe, guards, honest failure (75)
+npm run test:screen      # the screen tool: real captures on a virtual X display (99)
 npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (144)
 npm run test:browser     # a real browser: 30 actions end to end            (114)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
@@ -1070,14 +1070,14 @@ received the values. Two parts degrade honestly instead of pretending:
 
 - **No browser installed** — the browser suite reports that and exits 0. A
   missing browser is a missing browser, not a broken server.
-- **No desktop** — desktop capture cannot be exercised on a headless machine,
-  so what is testable there is tested: the PNG codec, the token maths, and the
-  decision table that picks a capture back end (which tool for X11 versus
-  Wayland, which ones cannot target a window, what to suggest installing).
-  The Windows script is checked the same way: its failure protocol, the
-  explanation each failure produces, and the temp path Node and .NET have to
-  agree on. The capture commands themselves are only exercised where there is
-  a screen.
+- **No desktop** — when `Xvfb` is installed, the screen suite starts a virtual
+  X display, puts a window on it and captures it for real: the whole screen,
+  one display, one window, an exact rectangle, saved to disk and viewed back.
+  That is the test that matters, because the bugs live in the commands, not
+  around them. Without `Xvfb` the suite says so and skips that block, and what
+  remains still runs: the PNG codec, the token maths, the back-end decision
+  table, and — for Windows — the failure protocol, the explanation each failure
+  produces, and the temp path Node and .NET have to agree on.
 
 The plugin suite needs no accounts and no secrets: it stands up local mock
 servers that speak the real wire formats — including an actual UDP socket that
@@ -1141,10 +1141,12 @@ signposted rather than discovered.
 The browser paths are tested on Linux against a real Chromium, and the Windows
 and macOS browser paths use the same protocol code — only the search for the
 binary differs per platform. Desktop capture is the one part where the
-per-platform commands differ substantially: the Linux back-end selection is
-covered by tests, the PowerShell and `screencapture` invocations are not yet
-exercised on a machine with a screen. If one misbehaves, please open an issue —
-`--doctor` output is the useful thing to paste.
+per-platform commands differ substantially: the Linux ones are now captured for
+real against a virtual X display, and the PowerShell script is parsed and its
+failure protocol exercised by an actual PowerShell — but a successful Windows
+capture, and every macOS capture, still depend on a machine we cannot run here.
+If one misbehaves, please open an issue: `screen { action: "probe" }` output is
+the useful thing to paste.
 
 ---
 

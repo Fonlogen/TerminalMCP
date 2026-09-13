@@ -74,8 +74,18 @@ export const DEFAULT_PROFILE = 'all';
  * Accepts a comma/space separated list of group names and aliases, with
  * `-name` removing one:  "all", "dev", "core,git,sys", "all,-watch,-archive".
  * `core` is always present — without it there is no server.
+ *
+ * `groupMap` may carry plugin groups alongside the built-in ones. A plugin is
+ * enabled by having been loaded at all (naming it in `plugins` is the request
+ * to use it), so it is never part of `all` but is on unless explicitly
+ * removed with `-name`.
  */
-export function resolveGroups(spec) {
+export function resolveGroups(spec, groupMap = GROUPS) {
+  const names = Object.keys(groupMap);
+  const builtin = names.filter((n) => !groupMap[n].plugin);
+  const pluginNames = names.filter((n) => groupMap[n].plugin);
+  const aliases = { ...ALIASES, all: builtin };
+
   const raw = spec === undefined || spec === null || spec === '' ? DEFAULT_PROFILE : spec;
   const tokens = (Array.isArray(raw) ? raw : String(raw).split(/[,\s]+/))
     .map((t) => String(t).trim())
@@ -89,7 +99,7 @@ export function resolveGroups(spec) {
     const negate = token.startsWith('-') || token.startsWith('!');
     const name = (negate ? token.slice(1) : token).toLowerCase();
 
-    const expand = ALIASES[name] ?? (GROUPS[name] ? [name] : null);
+    const expand = aliases[name] ?? (groupMap[name] ? [name] : null);
     if (!expand) { unknown.push(name); continue; }
     for (const g of expand) {
       if (negate) removed.add(g);
@@ -100,30 +110,33 @@ export function resolveGroups(spec) {
   if (unknown.length) {
     throw new Error(
       `Unknown tool group(s): ${unknown.join(', ')}. ` +
-      `Groups: ${GROUP_NAMES.join(', ')}. Bundles: ${Object.keys(ALIASES).join(', ')}.`,
+      `Groups: ${builtin.join(', ')}. Bundles: ${Object.keys(aliases).join(', ')}.` +
+      `${pluginNames.length ? ` Plugins loaded: ${pluginNames.join(', ')}.` : ''}`,
     );
   }
 
   // A spec of only removals means "everything except these".
-  if (!selected.size && removed.size) for (const g of GROUP_NAMES) selected.add(g);
+  if (!selected.size && removed.size) for (const g of builtin) selected.add(g);
 
+  for (const g of pluginNames) selected.add(g);
   for (const g of removed) selected.delete(g);
-  for (const g of GROUP_NAMES) if (GROUPS[g].always) selected.add(g);
+  for (const g of names) if (groupMap[g].always) selected.add(g);
 
-  return GROUP_NAMES.filter((g) => selected.has(g));
+  return names.filter((g) => selected.has(g));
 }
 
 /**
  * Build the active toolset.
  * Returns { groups, tools, handlers, bytes, estimatedTokens }.
  */
-export function buildToolset(spec, ctx) {
-  const groups = resolveGroups(spec);
+export function buildToolset(spec, ctx, pluginGroups = {}) {
+  const groupMap = { ...GROUPS, ...pluginGroups };
+  const groups = resolveGroups(spec, groupMap);
   const tools = [];
   let handlers = {};
 
   for (const name of groups) {
-    const group = GROUPS[name];
+    const group = groupMap[name];
     tools.push(...group.tools);
     if (group.createHandlers) handlers = { ...handlers, ...group.createHandlers(ctx) };
   }
@@ -140,16 +153,18 @@ export function buildToolset(spec, ctx) {
 }
 
 /** One line per group, for --list-tools and shell_info. */
-export function describeGroups(activeGroups = []) {
+export function describeGroups(activeGroups = [], pluginGroups = {}) {
+  const groupMap = { ...GROUPS, ...pluginGroups };
   const active = new Set(activeGroups);
-  return GROUP_NAMES.map((name) => {
-    const g = GROUPS[name];
+  return Object.keys(groupMap).map((name) => {
+    const g = groupMap[name];
     const bytes = JSON.stringify({ tools: g.tools }).length;
     return {
       name,
       label: g.label,
       active: active.has(name),
       always: Boolean(g.always),
+      plugin: Boolean(g.plugin),
       toolNames: g.tools.map((t) => t.name),
       estimatedTokens: Math.round(bytes / 3.6),
     };

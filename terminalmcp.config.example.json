@@ -90,6 +90,61 @@
   // Bundles: all, minimal, dev, ops, web
   "tools": "all",
 
+  // ---- Optional plugins. Off unless named here. ----
+  // Built in: "fivem", "discord", "telegram". Or a path to your own .js file
+  // exporting TOOLS + createHandlers, the same shape as src/tools/*.js.
+  // A plugin is never part of "all": its schemas cost tokens on every request
+  // and most sessions do not need them.
+  "plugins": [],
+
+  // Per-plugin settings. A string of the form "env:SOME_VAR" is read from that
+  // environment variable, which is how to keep a token out of a file you might
+  // commit by accident.
+  "pluginConfig": {
+    "fivem": {
+      // The GAME/HTTP port from server.cfg (endpoint_add_tcp), not txAdmin's.
+      "host": "127.0.0.1",
+      "port": 30120,
+      // Needs `set rcon_password "…"` in server.cfg. If TerminalMCP starts the
+      // FXServer itself, shell_job is a better console channel than RCON: it
+      // is the real stdout and cannot lose a packet.
+      "rconPassword": "env:FIVEM_RCON_PASSWORD",
+      // Optional guardrails on what RCON may run. Regexes, case-insensitive.
+      // denyCommands wins over allowCommands.
+      "allowCommands": [],
+      "denyCommands": ["^quit"],
+      "txadmin": {
+        "url": "http://127.0.0.1:40120",
+        // Only /host/status is a documented txAdmin API, and it needs this
+        // token (TXHOST_API_TOKEN on the txAdmin side).
+        "envToken": "env:TXHOST_API_TOKEN",
+        // The rest drives txAdmin's own panel interface, which is not a
+        // documented API and can change between txAdmin versions.
+        "user": null,
+        "password": "env:TXADMIN_PASSWORD"
+      },
+      // The optional in-game bridge resource. Read
+      // plugins/fivem/resource/README.md before installing it: it grants
+      // arbitrary Lua execution on the server and on clients.
+      "bridge": { "url": null, "secret": "env:FIVEM_BRIDGE_SECRET" }
+    },
+    "discord": {
+      // A bot token reads and writes; a webhook URL can only post. Either
+      // alone is enough, and both together is fine.
+      "token": "env:DISCORD_BOT_TOKEN",
+      "webhook": "env:DISCORD_WEBHOOK_URL",
+      "defaultChannel": null,
+      // If non-empty, only these channel ids may be touched.
+      "allowedChannels": []
+    },
+    "telegram": {
+      "token": "env:TELEGRAM_BOT_TOKEN",
+      "defaultChat": null,
+      // If non-empty, only these chat ids may be touched.
+      "allowedChats": []
+    }
+  },
+
   // ---- Browser control (the `browser` tool). ----
   "browser": {
     // Path to a Chromium-family binary (Chrome, Chromium, Edge, Brave).

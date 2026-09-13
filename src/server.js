@@ -36,8 +36,13 @@ export function log(...args) {
 }
 
 export class Server {
-  constructor(cfg) {
+  /**
+   * `plugins` is the already-loaded result of loadPlugins(), passed in rather
+   * than loaded here: importing a module is async, and a constructor is not.
+   */
+  constructor(cfg, plugins = { groups: {}, loaded: [], errors: [] }) {
     this.cfg = cfg;
+    this.plugins = plugins;
     this.jobs = new JobManager(cfg);
     this.vars = new VarStore({
       varsFile: cfg.varsFile,
@@ -48,12 +53,11 @@ export class Server {
     });
     // The active toolset depends on cfg.tools, so it is built per server
     // rather than being a module-level constant.
-    const toolset = buildToolset(cfg.tools, {
-      cfg,
-      jobs: this.jobs,
-      vars: this.vars,
-      server: this,
-    });
+    const toolset = buildToolset(
+      cfg.tools,
+      { cfg, jobs: this.jobs, vars: this.vars, server: this },
+      plugins.groups,
+    );
     this.tools = toolset.tools;
     this.handlers = toolset.handlers;
     this.toolGroups = toolset.groups;
@@ -110,7 +114,9 @@ export class Server {
               'Full terminal, browser and system control. Batch work through shell_bulk instead ' +
               'of many shell_exec calls; locate code with search_text instead of reading whole ' +
               'files; patch files with file_edit; call project_info once to orient in an ' +
-              'unfamiliar repo; read a web page with browser snapshot rather than its HTML.',
+              'unfamiliar repo; read a web page with browser snapshot rather than its HTML. ' +
+              'Some setups also expose optional integrations (fivem, discord, telegram) — use ' +
+              'their wait/updates actions to block for a reply instead of polling.',
           });
         }
 

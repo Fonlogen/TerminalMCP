@@ -61,6 +61,8 @@ GOOD: shell_bulk { steps: [
 | See what a page looks like, or what is on screen | `browser` action `screenshot`, `screen` action `shot` |
 | Look at an image file | `screen` action `view` |
 | Which OS / shell / profile am I on | `shell_info` |
+| Tell a person the work is done | `discord` / `telegram`, if those tools are present |
+| Operate a FiveM/RedM server | `fivem`, if that tool is present |
 
 ## shell_bulk — the workhorse
 
@@ -497,6 +499,25 @@ Two things to keep in mind:
 `view` is worth remembering for its own sake: it turns any png/jpeg/gif/webp on
 disk into something you can actually look at — a screenshot from earlier in the
 task, a chart a script just produced, a mockup the user pointed you at.
+
+## Optional integrations
+
+Some setups also expose `fivem`, `discord` or `telegram`. They are off by
+default, so do not assume they exist — if one is in your tool list, it is
+enabled and configured, and each has its own skill with the detail.
+
+Two habits carry over from everything else here:
+
+- **Blocking beats polling.** `telegram { action: "updates", wait: 60 }` and
+  `discord { action: "wait", wait: 60 }` return the moment a message arrives.
+  One call, not a loop.
+- **Send the artefact, not a description of it.** `screen`/`browser` produce a
+  screenshot; `discord upload` and `telegram send_file` put it in front of a
+  person. A picture of the broken page beats a paragraph about it.
+
+And one rule that is not about tokens: these reach other people. Sending a
+message, kicking a player or restarting a game server is not undoable. Say what
+you are about to do before doing it, unless you were asked to do exactly that.
 
 ## Long-running work
 

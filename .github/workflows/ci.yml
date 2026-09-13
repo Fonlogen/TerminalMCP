@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          for f in src/*.js src/tools/*.js bin/*.js test/*.mjs scripts/*.mjs; do
+          for f in src/*.js src/tools/*.js bin/*.js test/*.mjs scripts/*.mjs plugins/*/*.js; do
             node --check "$f"
           done
           echo "all files parse"
@@ -65,6 +65,11 @@ jobs:
               }
             });
           '
+
+      # Plugins are off by default, so this proves the loader wires them up and
+      # that each one reports honestly that it has no credentials.
+      - name: Check the plugins load
+        run: node bin/terminalmcp.js --plugin fivem --plugin discord --plugin telegram --doctor
 
       - name: Test suite
         run: npm test

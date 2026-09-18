@@ -57,6 +57,7 @@ export const INTERPOLATE_FIELDS = {
   // it in their browser would be the worst possible place to be clever.
   browser: ['url', 'selector', 'text', 'value', 'label', 'path'],
   screen: ['path', 'window'],
+  input: ['text', 'window'],
 };
 
 /** Context every ${...} is resolved against. */

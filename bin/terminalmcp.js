@@ -91,6 +91,7 @@ Options:
                            dev      core + search, git, fs, dev, data (~9.2k)
                            ops      core + search, fs, archive, sys, net (~8.5k)
                            web      core + browser, screen, net, search, fs (~10.6k)
+                           desktop  core + screen, input, fs, search
                          Or a list: --tools core,git,search  /  --tools all,-watch,-archive
                          Groups are sent in the order you name them. That matters because
                          some clients cap how much tool schema they accept and drop the

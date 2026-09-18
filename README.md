@@ -223,6 +223,18 @@ screen { action: "shot", mode: "region", x: 0, y: 0, width: 900, height: 240 }
 screen { action: "view", path: "designs/mockup.png" }
 ```
 
+**Acting on what you see.** Some software has no other way in: an installer
+with no silent switch, a launcher, a native dialog, a legacy admin panel. The
+loop is capture, decide, act, capture again — and `shot: true` makes the last
+two one call:
+
+```
+screen { action: "windows" }                                  what is open
+input  { action: "click", x: 812, y: 455, window: "Setup", shot: true }
+input  { action: "type", text: "D:\\Games\\server" }
+input  { action: "key", keys: "enter", shot: true }
+```
+
 **Closing the loop with a person.** The work is only finished when somebody
 knows about it. Optional plugins put the result where they already are — and
 `wait` blocks until they answer, so asking a question costs one call rather
@@ -557,6 +569,48 @@ reports the window station (only `WinSta0` can capture), the Windows session
 id, the PowerShell version, and the result of a one-pixel test capture with the
 exact exception — then tries a real 8×8 capture end to end. The fix is almost
 always to start the server from a terminal inside your own logged-in session.
+
+### `input`
+
+| Tool | Purpose |
+| --- | --- |
+| `input` | `move` (absolute or by an offset), `click` (any button, any count), `drag`, `scroll`, `type` (real characters, so accents and any layout work), `key` (chords and sequences, with `hold_ms` for software that needs the key held), `position`, `focus` a window by title, and `probe`. |
+
+Two things make it usable rather than merely present:
+
+- **`shot: true`** returns a screenshot taken straight after the action, so one
+  call both acts and shows the result. Acting blind and then capturing is two
+  calls and a race.
+- **`window`** raises that window first. Input follows the focus, and the
+  window that had focus is not always the one you meant — this is the
+  difference between typing a path into an installer and typing it into
+  somebody's chat.
+
+```
+input { action: "key", keys: "ctrl+shift+esc" }      a chord
+input { action: "key", keys: "alt+f x" }             a sequence, in order
+input { action: "key", keys: "w", hold_ms: 800 }     held down, not tapped
+input { action: "type", text: "città" }              characters, not keystrokes
+input { action: "drag", x: 100, y: 100, to_x: 400, to_y: 300 }
+```
+
+`readOnly` blocks all of it. `position` and `probe` still answer.
+
+#### What "HID" does and does not mean here
+
+Input is synthesised by the operating system — `SendInput` on Windows,
+`xdotool` on X11, `osascript` or `cliclick` on macOS. Applications receive
+those events through the same path as real ones and cannot tell the difference.
+
+What they are not is *physical*. Software that reads raw HID and deliberately
+checks — which is what anti-cheat does — can refuse injected input, and no
+setting changes that. A game that ignores this needs a microcontroller
+presenting itself as a real USB keyboard, which is a different backend and not
+a flag. Everything that is not actively looking for injection works.
+
+Wayland refuses input injection by design; there `ydotool` (pointer, via
+`/dev/uinput`) and `wtype` (keyboard) are the way through, and `probe` says
+which of them is installed. An X11 session needs only `xdotool`.
 
 Every failure the Windows side can hit comes back named rather than as a
 generic "capture failed": no interactive desktop, a temp directory that cannot
@@ -1005,6 +1059,7 @@ src/cdp.js                Chrome DevTools Protocol: discovery, launch, sessions
 src/browser.js            page operations: snapshot, input, capture, network
 src/image.js              PNG decode / resize / encode, and image token maths
 src/screen.js             desktop capture per platform, display and window lists
+src/input.js              mouse and keyboard per platform, key tables, chords
 src/shells.js             shell detection and per-platform invocation
 src/config.js             configuration loading and precedence
 src/guards.js             optional guardrails
@@ -1019,7 +1074,7 @@ src/tools/*.js            one module per tool group
 skills/terminalmcp/       the skill that teaches a model to use it well
 ```
 
-Roughly 15,700 lines of source, 3,900 lines of tests, zero dependencies.
+Roughly 18,000 lines of source, 4,800 lines of tests, zero dependencies.
 
 ### Implementation notes
 
@@ -1070,13 +1125,14 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 828 assertions
+npm test                 # 932 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: real captures on a virtual X display (99)
+npm run test:input       # the input tool: real clicks and keys, witnessed by xev (104)
 npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (144)
 npm run test:browser     # a real browser: 32 actions end to end, downloads  (130)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
@@ -1162,6 +1218,7 @@ signposted rather than discovered.
 | **MCP protocol** | 2024-11-05, 2025-03-26, 2025-06-18 (negotiated per session) |
 | **Browser control** | Chrome, Chromium, Edge, Brave, Vivaldi — anything Chromium-family, on all three platforms. Not Firefox: it dropped most of its CDP surface in favour of WebDriver BiDi, which is a different protocol. |
 | **Desktop capture** | Windows: PowerShell + System.Drawing, nothing to install — but it must run in the interactive desktop session, and `screen { action: "probe" }` says whether it does. macOS: `screencapture`, built in. Linux: whichever of `grim` (Wayland), `maim`, `import`, `scrot`, `spectacle`, `gnome-screenshot` is present — `--doctor` says which it found and what to install if none. |
+| **Mouse and keyboard** | Windows: `SendInput` through PowerShell, nothing to install. X11: `xdotool`. macOS: `osascript`, plus `cliclick` for pointer moves and drags. Wayland: `ydotool` and `wtype`, because the compositor allows nothing else. `input { action: "probe" }` says what is available. |
 | **Plugins** | Platform-independent: HTTPS and UDP. The FiveM client log that `f8` reads is Windows-only, because the FiveM client is. |
 
 The browser paths are tested on Linux against a real Chromium, and the Windows

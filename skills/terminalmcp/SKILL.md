@@ -455,6 +455,20 @@ browser { action: "eval", expression: "store.getState().user" }
 When something on a page does not behave, `console` and `network` usually
 answer it in one call — much cheaper than screenshotting and squinting.
 
+### Downloading a file
+
+```
+browser { action: "download", url: "https://site/pack.zip" }   fetch and wait
+browser { action: "download", text: "Download" }               click a link or button
+browser { action: "downloads" }                                what came down, and where
+```
+
+Use this rather than `http_request` whenever the file is behind a login: the
+browser already holds the session, so nothing has to be re-authenticated. It
+blocks until the file is written and tells you the path, so the next step can
+read it straight away. A URL that turns out to be a page rather than a file
+says so instead of waiting out the timeout.
+
 `eval` takes an expression (`document.title`, `({a: 1})`) or a body with a
 `return`. It awaits promises.
 

@@ -121,6 +121,7 @@ async function main() {
   console.log(`\nUsing ${found.path} (${found.kind}, via ${found.source})`);
 
   const dir = await mkdtemp(join(tmpdir(), 'tmcp-browser-'));
+  const DOWNLOAD_BODY = Buffer.alloc(5000, 0x41);
   let requests = 0;
   const srv = createServer((req, res) => {
     requests++;
@@ -137,6 +138,25 @@ async function main() {
     if (req.url === '/api/missing') {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       return res.end('nope');
+    }
+    if (req.url === '/downloads') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      return res.end('<h1>files</h1><a href="/file.bin" download>grab the archive</a>');
+    }
+    if (req.url === '/file.bin') {
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="resource.bin"',
+        'Content-Length': String(DOWNLOAD_BODY.length),
+      });
+      return res.end(DOWNLOAD_BODY);
+    }
+    if (req.url === '/file-hostile') {
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="../../escaped.txt"',
+      });
+      return res.end('no');
     }
     res.writeHead(200, {
       'Content-Type': 'text/html',
@@ -458,6 +478,52 @@ async function main() {
 
       const t = await c.call('browser', { action: 'eval', expression: 'document.title' });
       check('...and the browser really went there', /Second/.test(t.text), t.text);
+    }
+
+    console.log('\n--- downloads ---');
+    {
+      const downloadDir = join(dir, '.terminalmcp', 'downloads');
+
+      let r = await c.call('browser', { action: 'download', url: `${base}/file.bin` });
+      check('a download by url succeeds', !r.isError, r.text);
+      check('...and reports the name the server suggested', /resource\.bin/.test(r.text), r.text);
+      check('...as completed, with its size', /completed/.test(r.text) && /4\.9 KB/.test(r.text), r.text);
+
+      const first = join(downloadDir, 'resource.bin');
+      const onDisk = await readFile(first).catch(() => null);
+      check('...and the bytes on disk are the bytes served', onDisk?.equals(DOWNLOAD_BODY) === true, String(onDisk?.length));
+
+      // The same filename twice must not quietly destroy the first one.
+      r = await c.call('browser', { action: 'download', url: `${base}/file.bin` });
+      check('the same file again lands beside it', /resource \(2\)\.bin/.test(r.text), r.text);
+      const stillThere = await readFile(first).catch(() => null);
+      check('...leaving the first download intact', stillThere?.equals(DOWNLOAD_BODY) === true, String(stillThere?.length));
+
+      // The common case: a link on a page, clicked.
+      await c.call('browser', { action: 'navigate', url: `${base}/downloads` });
+      r = await c.call('browser', { action: 'download', text: 'grab the archive' });
+      check('a download started by clicking a link works', !r.isError && /completed/.test(r.text), r.text);
+      check('...and says what it clicked', /clicked <a>/.test(r.text), r.text);
+
+      // A filename from a Content-Disposition header is attacker input.
+      r = await c.call('browser', { action: 'download', url: `${base}/file-hostile` });
+      check('a filename that tries to escape the directory is defused', !r.isError && !/\.\.[\\/]/.test(r.text), r.text);
+      check('...and the file stays in the download directory', r.text.includes(downloadDir), r.text);
+      const escaped = await stat(join(dir, '..', '..', 'escaped.txt')).catch(() => null);
+      check('...nothing was written outside it', escaped === null);
+
+      // Navigating to a file URL aborts the navigation by design. That must
+      // read as a download, not as a failure.
+      r = await c.call('browser', { action: 'navigate', url: `${base}/file.bin` });
+      check('navigate to a file url reports the download', !r.isError && /is a download, not a page/.test(r.text), r.text);
+
+      r = await c.call('browser', { action: 'downloads' });
+      check('the list shows every download', (r.text.match(/completed/g) || []).length >= 5, r.text);
+      check('...and where they were saved', r.text.includes(downloadDir), r.text);
+
+      r = await c.call('browser', { action: 'download', url: `${base}/second`, timeout_ms: 4000 });
+      check('a page that is not a download says so plainly', /no download started/.test(r.text), r.text);
+      check('...and points at where to look instead', /network/.test(r.text), r.text);
     }
 
     console.log('\n--- shutting down ---');

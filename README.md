@@ -493,6 +493,7 @@ DevTools Protocol.
 | Interaction | `click`, `type`, `fill`, `press`, `hover`, `scroll`, `select` |
 | Waiting | `wait` for a selector, text, its disappearance, a lifecycle state, network idle, or just a delay |
 | Capture | `screenshot` (viewport, `full_page`, or one element — returned inline so the model can see it), `pdf` |
+| Files | `download` (a URL, or a link/button to click) waits for the file and reports where it landed; `downloads` lists them |
 | State | `cookies`, `cookie_set`, `cookies_clear` |
 | Diagnostics | `console` (filterable by level), `network` (filterable by URL, or `failed: true` for just the problems) |
 
@@ -501,6 +502,32 @@ Every element target accepts one of three things: `ref` from the last snapshot
 element by what it says. Ambiguous text prefers the thing you can act on and
 the innermost match, so `text: "Sign in"` picks the button rather than the
 heading above it that says the same words.
+
+#### Downloads
+
+A download is the one thing a browser does that produces no page, which is why
+it used to look broken: navigating to a file URL aborts its own navigation —
+Chromium hands the bytes to the download manager and no document is ever
+committed — so `navigate` reported a failure while the file was, in fact,
+arriving.
+
+```
+browser { action: "download", url: "https://example.com/pack.zip" }
+browser { action: "download", text: "Download release" }     a link or button
+browser { action: "download" }                    just wait for what the page started
+browser { action: "downloads", wait: true }
+```
+
+`download` blocks until the file is on disk and answers with its real name,
+its size and its path. The point is the session: a file behind a login comes
+down with the cookies the browser already has, which is the whole reason not to
+reach for `http_request`. `navigate` now recognises a download too, instead of
+reporting a navigation failure.
+
+Files land in `.terminalmcp/downloads` (configurable with `browser.downloadDir`),
+named by what the server suggested — sanitised, because a `Content-Disposition`
+filename is attacker-controlled input, and never overwriting: a second
+`pack.zip` becomes `pack (2).zip`.
 
 Browsers are found automatically: the usual install locations per platform,
 then `$CHROME_PATH`, then a Playwright or Puppeteer cache if you already have
@@ -1044,7 +1071,7 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 812 assertions
+npm test                 # 828 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
@@ -1052,7 +1079,7 @@ npm run test:vars        # variables, interpolation, secrets, persistence    (67
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: real captures on a virtual X display (99)
 npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (144)
-npm run test:browser     # a real browser: 30 actions end to end            (114)
+npm run test:browser     # a real browser: 32 actions end to end, downloads  (130)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```
 

@@ -22,6 +22,7 @@ import {
   getText,
   hover,
   navigate,
+  navigateForDownload,
   pageInfo,
   pressKey,
   printPdf,
@@ -29,10 +30,10 @@ import {
   renderSnapshot,
   saveBuffer,
   screenshot,
-  shortUrl,
   scroll,
   selectOption,
   setCookie,
+  shortUrl,
   snapshot,
   typeText,
   waitFor,
@@ -49,7 +50,7 @@ export const TOOLS = [
       'each with a ref, for a fraction of the tokens the HTML would cost — then click/type/select ' +
       'by ref. Use html only when you actually need the markup. Also: navigate, text, eval, wait, ' +
       'screenshot (viewport, full page or one element, viewable inline), pdf, cookies, console and ' +
-      'network logs, and tabs.',
+      'network logs, and tabs. download fetches a file using the session the browser already has — from a URL, a link or a button — and waits for it to finish, so anything behind a login comes down without signing in again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -64,6 +65,7 @@ export const TOOLS = [
             'wait', 'screenshot', 'pdf',
             'cookies', 'cookie_set', 'cookies_clear',
             'console', 'network', 'resize',
+            'download', 'downloads',
           ],
           description: 'What to do.',
         },
@@ -113,6 +115,7 @@ export const TOOLS = [
         host: { type: 'string', description: 'attach: host running the browser. Default 127.0.0.1.' },
         args: { type: 'array', items: { type: 'string' }, description: 'launch: extra browser command-line flags.' },
         max_bytes: { type: 'integer', description: 'Byte cap on returned text.' },
+        wait: { type: 'boolean', description: 'downloads: block until the ones in flight finish. Default false.' },
       },
       required: ['action'],
     },
@@ -319,12 +322,24 @@ export function createHandlers({ cfg }) {
         // ------------------------------------------------------ navigation
         case 'navigate': {
           const page = mgr.page(a.tab ?? null);
-          const nav = await navigate(page, {
-            url: a.url,
-            waitUntil: a.wait_until ?? 'load',
-            timeoutMs: timeout(a, 30000),
-          });
-          return renderNav(nav);
+          const since = mgr.downloadSeq;
+          try {
+            const nav = await navigate(page, {
+              url: a.url,
+              waitUntil: a.wait_until ?? 'load',
+              timeoutMs: timeout(a, 30000),
+            });
+            return renderNav(nav);
+          } catch (err) {
+            // A URL that is a file aborts its own navigation: Chromium gives
+            // the response to the download manager and no document is ever
+            // committed. Reporting that as a failed navigation is how a
+            // perfectly good download came to look blocked.
+            if (!/ERR_ABORTED/i.test(err.message)) throw err;
+            const got = await mgr.waitForDownloads({ since, timeoutMs: 5000 });
+            if (!got) throw err;
+            return `that URL is a download, not a page\n${renderDownloads(got, mgr)}`;
+          }
         }
 
         case 'back':
@@ -587,6 +602,60 @@ export function createHandlers({ cfg }) {
           );
         }
 
+        case 'download': {
+          // Three ways a download starts, and all three end the same way:
+          // a URL to open, an element to click, or something the page is
+          // already doing that we only need to wait for.
+          const since = mgr.downloadSeq;
+          const timeoutMs = a.timeout_ms ?? 120000;
+          let how;
+          if (a.url) {
+            const page = mgr.page(a.tab ?? null);
+            how = `opened ${shortUrl(await navigateForDownload(page, a.url, { timeoutMs: 30000 }))}`;
+          } else if (a.ref || a.selector || a.text) {
+            const page = mgr.page(a.tab ?? null);
+            const r = await click(page, spec(a), { button: a.button ?? 'left', count: a.count ?? 1 });
+            how = `clicked <${r.box.tag}>${r.box.name ? ` "${r.box.name}"` : ''}`;
+          } else {
+            how = 'waited for whatever the page had already started';
+          }
+
+          const got = await mgr.waitForDownloads({ since, timeoutMs });
+          if (!got) {
+            return (
+              `${how}, but no download started within ${ms(timeoutMs)}.\n` +
+              `${mgr.downloadEvents
+                ? 'The browser reported no download at all, so that URL or element probably rendered a page instead — ' +
+                  'check action "network" for what came back.'
+                : `This browser would not report downloads (${mgr.downloadError ?? 'setDownloadBehavior refused'}), ` +
+                  `so nothing can be waited on here. Look in ${mgr.downloadDir()} yourself.`}`
+            );
+          }
+          return `${how}\n${renderDownloads(got, mgr)}`;
+        }
+
+        case 'downloads': {
+          if (a.wait) {
+            const pending = mgr.pendingDownloads();
+            if (pending.length) {
+              await mgr.waitForDownloads({
+                since: Math.min(...pending.map((d) => d.index)) - 1,
+                timeoutMs: a.timeout_ms ?? 120000,
+              });
+            }
+          }
+          const all = mgr.downloadList();
+          if (!all.length) {
+            return (
+              `No downloads yet. Files go to ${mgr.downloadDir()}.\n` +
+              `${mgr.downloadEvents
+                ? 'Start one with action "download" (a url, or a ref/selector to click).'
+                : `This browser refused to report downloads: ${mgr.downloadError ?? 'unknown reason'}`}`
+            );
+          }
+          return renderDownloads(all, mgr);
+        }
+
         default:
           throw new Error(
             `Unknown browser action "${action}". See the action enum; start with launch or attach, ` +
@@ -595,6 +664,29 @@ export function createHandlers({ cfg }) {
       }
     },
   };
+}
+
+/** One line per download: state, size, name, and where it landed. */
+function renderDownloads(list, mgr) {
+  const lines = list.map((d) => {
+    const size = d.total ? `${fmtBytes(d.received)}/${fmtBytes(d.total)}` : fmtBytes(d.received);
+    const took = d.endedAt ? ` in ${ms(d.endedAt - d.startedAt)}` : '';
+    const where = d.path ? `\n      -> ${d.path}` : '';
+    const why = d.error ? `  (${d.error})` : '';
+    return `  ${String(d.index).padEnd(4)}${d.state.padEnd(12)}${size.padEnd(18)}${d.name}${took}${why}${where}`;
+  });
+  const done = list.filter((d) => d.state === 'completed').length;
+  return (
+    `${list.length} download(s), ${done} completed, saved under ${mgr.downloadDir()}\n` +
+    `${lines.join('\n')}`
+  );
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function renderStatus(d) {

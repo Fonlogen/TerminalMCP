@@ -15,7 +15,7 @@ import { createServer } from 'node:http';
 import dgram from 'node:dgram';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
 
@@ -682,6 +682,115 @@ async function main() {
 
       r = await c.call('fivem', { action: 'status', port: 1 });
       check('a port the runtime refuses to dial says why', r.isError && /bad port/.test(r.text), r.text);
+    }
+
+    console.log('\n--- fivem: reading the manifest before reading the code ---');
+    {
+      const {
+        classifyResourceFiles,
+        escrowLabel,
+        escrowStatus,
+        globToRegExp,
+        parseEscrowIgnore,
+        stripLuaComments,
+      } = await import('../plugins/fivem/plugin.js');
+
+      const manifest = [
+        "fx_version 'cerulean'",
+        "game 'gta5'",
+        "-- escrow_ignore { 'commented_out.lua' }",
+        '--[[ escrow_ignore { "block_commented.lua" } ]]',
+        'escrow_ignore {',
+        "  'config.lua',",
+        '  "client/cl_open.lua",',
+        "  'locales/**/*.lua',",
+        '}',
+        "dependency '/assetpacks'",
+      ].join('\n');
+
+      const globs = parseEscrowIgnore(manifest);
+      check('escrow_ignore is read from the manifest', globs.length === 3, JSON.stringify(globs));
+      check('...keeping both quote styles', globs.includes('client/cl_open.lua'), JSON.stringify(globs));
+      check('a commented-out directive is not obeyed', !globs.includes('commented_out.lua'), JSON.stringify(globs));
+      check('...nor one inside a block comment', !globs.includes('block_commented.lua'), JSON.stringify(globs));
+      check('comments are stripped without eating code', /fx_version/.test(stripLuaComments(manifest)));
+      check('the one-line form is read too', parseEscrowIgnore("escrow_ignore { 'a.lua', 'b.lua' }").length === 2);
+      check('...and the call form with parentheses', parseEscrowIgnore("escrow_ignore({ 'a.lua' })").length === 1);
+      check('a manifest with no directive yields nothing', parseEscrowIgnore("fx_version 'cerulean'").length === 0);
+
+      check('* stays inside one path segment', globToRegExp('client/*.lua').test('client/a.lua') && !globToRegExp('client/*.lua').test('client/sub/a.lua'));
+      check('** crosses directories', globToRegExp('locales/**/*.lua').test('locales/it/it.lua'));
+      check('...and also matches none of them', globToRegExp('locales/**/*.lua').test('locales/en.lua'));
+      check('a literal path matches only itself', globToRegExp('config.lua').test('config.lua') && !globToRegExp('config.lua').test('other/config.lua'));
+
+      const files = [
+        'fxmanifest.lua', 'config.lua', 'client/cl_open.lua', 'client/cl_main.lua',
+        'locales/it.lua', 'server/sv_main.lua', 'html/ui.js', 'stream/car.ytd', 'x.fxap',
+      ];
+      const st = escrowStatus({ manifest, files });
+      check('an .fxap makes it certain', st.escrowed && st.certain, JSON.stringify(st.signals));
+      check('...and every signal is reported', st.signals.length === 3, JSON.stringify(st.signals));
+      check('escrow_ignore alone is only escrow-ready', escrowLabel(escrowStatus({ manifest, files: ['fxmanifest.lua'] })) === 'ESCROW-READY');
+      check('no signals at all is open', escrowLabel(escrowStatus({ manifest: "fx_version 'cerulean'", files: ['a.lua'] })) === 'open');
+
+      const c1 = classifyResourceFiles(files, st.globs);
+      check('the manifest is always readable', c1.readable.includes('fxmanifest.lua'), c1.readable.join(','));
+      check('listed files are readable', c1.readable.includes('config.lua') && c1.readable.includes('locales/it.lua'), c1.readable.join(','));
+      check('unlisted scripts are encrypted', c1.encrypted.includes('client/cl_main.lua') && c1.encrypted.includes('server/sv_main.lua'), c1.encrypted.join(','));
+      check('javascript counts as a script', c1.encrypted.includes('html/ui.js'), c1.encrypted.join(','));
+      check('assets are neither', c1.assets.includes('stream/car.ytd'), c1.assets.join(','));
+      const c2 = classifyResourceFiles(files, [], { escrowed: false });
+      check('with no escrow, nothing is called encrypted', c2.encrypted.length === 0 && c2.readable.includes('server/sv_main.lua'), c2.encrypted.join(','));
+
+      // And now the whole thing, against a folder shaped like a real server's.
+      const res = join(dir, 'resources');
+      const paid = join(res, '[esx]', 'esx_policejob');
+      await mkdir(join(paid, 'client'), { recursive: true });
+      await mkdir(join(paid, 'server'), { recursive: true });
+      await mkdir(join(paid, 'locales', 'extra'), { recursive: true });
+      await writeFile(join(paid, 'fxmanifest.lua'), manifest);
+      await writeFile(join(paid, 'config.lua'), 'Config = {}\n'.repeat(50));
+      await writeFile(join(paid, 'client', 'cl_open.lua'), '-- open\n');
+      await writeFile(join(paid, 'client', 'cl_main.lua'), 'GARBAGE'.repeat(100));
+      await writeFile(join(paid, 'server', 'sv_main.lua'), 'GARBAGE'.repeat(100));
+      await writeFile(join(paid, 'locales', 'extra', 'nl.lua'), 'Locales = {}\n');
+      await writeFile(join(paid, 'esx_policejob.fxap'), 'FXAP');
+
+      const open = join(res, 'myscript');
+      await mkdir(open, { recursive: true });
+      await writeFile(join(open, '__resource.lua'), "resource_manifest_version '44febabe-d386-4d18-afbe-5e627f4af937'\nclient_script 'client.lua'\n");
+      await writeFile(join(open, 'client.lua'), 'print("hi")\n');
+
+      let r = await c.call('fivem', { action: 'inspect', dir: res, resource: 'esx_policejob' });
+      check('inspect finds a resource inside a [category] folder', !r.isError && /esx_policejob/.test(r.text), r.text.slice(0, 200));
+      check('...and calls it escrowed', /ESCROWED/.test(r.text), r.text.slice(0, 200));
+      check('...naming the .fxap as the reason', /\.fxap file is present/.test(r.text), r.text.slice(0, 300));
+      check('...listing the readable files', /config\.lua/.test(r.text) && /cl_open\.lua/.test(r.text), r.text);
+      check('...with their sizes, so the cost is visible', /config\.lua\s+\d/.test(r.text), r.text);
+      check('...matching ** across directories', /locales\/extra\/nl\.lua/.test(r.text), r.text);
+      check('...and listing what not to read', /do not read/.test(r.text) && /cl_main\.lua/.test(r.text), r.text);
+      check('...telling the reader why it matters', /ciphertext/.test(r.text), r.text);
+      const readableSection = r.text.split(/^encrypted/m)[0];
+      check('the encrypted files are not in the readable list',
+        !/cl_main\.lua|sv_main\.lua/.test(readableSection), readableSection);
+
+      r = await c.call('fivem', { action: 'inspect', dir: res, resource: 'myscript' });
+      check('a legacy __resource.lua is understood', !r.isError && /__resource\.lua/.test(r.text), r.text);
+      check('...and an open resource says read what you like', /nothing is encrypted/.test(r.text), r.text);
+
+      r = await c.call('fivem', { action: 'inspect', dir: res });
+      check('inspect with no name scans them all', !r.isError && /esx_policejob/.test(r.text) && /myscript/.test(r.text), r.text);
+      check('...marking which are escrowed', /ESCROWED/.test(r.text) && /open/.test(r.text), r.text);
+      check('...and counting them', /2 resource\(s\).*1 escrowed/.test(r.text), r.text);
+
+      r = await c.call('fivem', { action: 'inspect', dir: paid });
+      check('a resource folder can be given directly', !r.isError && /ESCROWED/.test(r.text), r.text.slice(0, 160));
+
+      r = await c.call('fivem', { action: 'inspect', dir: res, resource: 'no_such_resource' });
+      check('an unknown resource says what to do instead', r.isError && /lists what is there/.test(r.text), r.text);
+
+      r = await c.call('fivem', { action: 'inspect', dir: join(dir, 'not-a-directory') });
+      check('a missing directory is reported plainly', r.isError && /No such directory/.test(r.text), r.text);
     }
 
     console.log('\n--- fivem: RCON, on a real UDP socket ---');

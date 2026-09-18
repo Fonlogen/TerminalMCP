@@ -22,7 +22,7 @@
 //                    port. No password needed, and the fastest way to answer
 //                    "is it up and who is on it".
 
-import { readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -33,6 +33,123 @@ import { ms, truncateMiddle } from '../../src/format.js';
 import { rconCommand, rconRejection } from './rcon.js';
 
 export const LABEL = 'FiveM: RCON, txAdmin, server info, F8 client log';
+
+// ------------------------------------------------------------------- escrow
+//
+// Most paid FiveM resources ship through Cfx.re asset escrow: the scripts are
+// encrypted, the server decrypts them at runtime, and an `.fxap` file sits in
+// the resource root. The manifest then lists, under `escrow_ignore`, the files
+// the author deliberately left in the clear — usually the config and whatever
+// is meant to be edited.
+//
+// That list is the whole readable surface of the resource. Everything else is
+// ciphertext, and reading it is not a mistake that announces itself: the file
+// opens, bytes come back, and thousands of tokens are spent on noise. So the
+// rule is: look at the manifest first, and read only what it says is readable.
+
+/** Lua comments, removed, so a commented-out directive is not read as one. */
+export function stripLuaComments(text) {
+  return String(text ?? '')
+    // Long comments first: --[[ ... ]] and --[==[ ... ]==].
+    .replace(/--\[(=*)\[[\s\S]*?\]\1\]/g, '')
+    .replace(/--[^\n]*/g, '');
+}
+
+/**
+ * The globs an fxmanifest declares as not encrypted.
+ *
+ * Accepts every spelling the manifest format allows: `escrow_ignore { ... }`,
+ * `escrow_ignore({ ... })`, one line or many, single or double quotes.
+ */
+export function parseEscrowIgnore(manifest) {
+  const clean = stripLuaComments(manifest);
+  const out = [];
+  const directive = /escrow_ignore\s*\(?\s*\{([\s\S]*?)\}/g;
+  let m;
+  while ((m = directive.exec(clean)) !== null) {
+    for (const entry of m[1].matchAll(/['"]([^'"]+)['"]/g)) {
+      const glob = entry[1].trim().replace(/^\.\//, '');
+      if (glob && !out.includes(glob)) out.push(glob);
+    }
+  }
+  return out;
+}
+
+/** A manifest glob as a regular expression: ** crosses directories, * does not. */
+export function globToRegExp(glob) {
+  let out = '';
+  const g = String(glob).replace(/\\/g, '/');
+  for (let i = 0; i < g.length; i++) {
+    const ch = g[i];
+    if (ch === '*') {
+      if (g[i + 1] === '*') {
+        // `**/` matches any number of directories, including none.
+        if (g[i + 2] === '/') { out += '(?:.*/)?'; i += 2; } else { out += '.*'; i += 1; }
+      } else {
+        out += '[^/]*';
+      }
+      continue;
+    }
+    if (ch === '?') { out += '[^/]'; continue; }
+    out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${out}$`, 'i');
+}
+
+/** Scripts are what escrow encrypts; everything else it leaves alone. */
+const SCRIPT_EXT = /\.(lua|js|mjs|cjs|ts)$/i;
+
+/**
+ * Split a resource's files into what can be read and what cannot.
+ *
+ * `files` are paths relative to the resource root, with forward slashes.
+ */
+export function classifyResourceFiles(files, globs, { manifestName = 'fxmanifest.lua', escrowed = true } = {}) {
+  const patterns = globs.map(globToRegExp);
+  const readable = [];
+  const encrypted = [];
+  const assets = [];
+  for (const file of files) {
+    const rel = String(file).replace(/\\/g, '/');
+    if (rel.toLowerCase() === manifestName.toLowerCase()) { readable.push(rel); continue; }
+    if (patterns.some((re) => re.test(rel))) { readable.push(rel); continue; }
+    // With no escrow, a script is just a script: the split would be a fiction.
+    if (SCRIPT_EXT.test(rel)) { (escrowed ? encrypted : readable).push(rel); continue; }
+    assets.push(rel);
+  }
+  return { readable, encrypted, assets };
+}
+
+/**
+ * How sure we are, in one word.
+ *
+ * An `.fxap` file means the build in front of you is encrypted. `escrow_ignore`
+ * on its own means the author prepared the resource for escrow — which is also
+ * what the *source* copy looks like, and that one is entirely readable. Saying
+ * ESCROWED for both would send someone hunting for ciphertext that is not there.
+ */
+export function escrowLabel(status) {
+  if (!status.escrowed) return 'open';
+  return status.certain ? 'ESCROWED' : 'ESCROW-READY';
+}
+
+/** What the manifest and the folder together say about escrow. */
+export function escrowStatus({ manifest = '', files = [] }) {
+  const globs = parseEscrowIgnore(manifest);
+  const clean = stripLuaComments(manifest);
+  const fxap = files.some((f) => /(^|\/)[^/]*\.fxap$/i.test(String(f).replace(/\\/g, '/')));
+  const assetpacks = /dependency\s*\(?\s*['"]\/assetpacks['"]/.test(clean);
+  return {
+    escrowed: fxap || globs.length > 0 || assetpacks,
+    certain: fxap,
+    globs,
+    signals: [
+      fxap ? 'an .fxap file is present' : null,
+      globs.length ? `escrow_ignore lists ${globs.length} pattern(s)` : null,
+      assetpacks ? "it depends on '/assetpacks'" : null,
+    ].filter(Boolean),
+  };
+}
 
 /** Actions that change something outside this machine; refused by readOnly. */
 export const MUTATING_ACTIONS = [
@@ -46,7 +163,7 @@ export const TOOLS = [
     description:
       'Control a FiveM/RedM server. status and players answer "is it up, who is on" with no ' +
       'password at all. rcon runs any console command over RCON; resource ensures/restarts one; ' +
-      'say broadcasts; kick removes a player. f8 reads the game client\'s F8 console log — the ' +
+      'say broadcasts; kick removes a player. RUN inspect BEFORE READING THE FILES OF A RESOURCE: it reads the manifest and says which files are readable, because an escrowed resource ships its scripts encrypted and reading those returns ciphertext at full token price. f8 reads the game client\'s F8 console log — the ' +
       'place client-side script errors actually appear. With the optional bridge resource ' +
       'installed, f8_exec runs a command in a chosen player\'s F8 console and client_lua/' +
       'server_lua evaluate Lua and return the value. tx_status, tx_control and tx_announce drive ' +
@@ -58,7 +175,7 @@ export const TOOLS = [
         action: {
           type: 'string',
           enum: [
-            'status', 'players', 'resources',
+            'status', 'players', 'resources', 'inspect',
             'rcon', 'resource', 'say', 'kick',
             'f8', 'f8_exec', 'client_lua', 'server_lua', 'bridge',
             'tx_status', 'tx_control', 'tx_announce', 'tx_log',
@@ -73,6 +190,7 @@ export const TOOLS = [
         reason: { type: 'string', description: 'kick: the reason shown to the player.' },
         lua: { type: 'string', description: 'client_lua / server_lua: a Lua expression or block. A block must return a value to get one back.' },
         lines: { type: 'integer', description: 'f8 / tx_log: how many lines from the end. Default 80.' },
+        dir: { type: 'string', description: 'inspect: the resources directory, or one resource folder. Default: the server cwd.' },
         match: { type: 'string', description: 'f8 / resources / tx_log: only lines (or resources) matching this regex.' },
         errors: { type: 'boolean', description: 'f8: only lines that look like errors, warnings or script failures.' },
         path: { type: 'string', description: 'f8: read this log file instead of finding the client log automatically.' },
@@ -93,6 +211,101 @@ function clientLogCandidates() {
   if (!local) return [];
   const app = join(local, 'FiveM', 'FiveM.app');
   return [join(app, 'logs'), app, join(local, 'FiveM')];
+}
+
+const MANIFESTS = ['fxmanifest.lua', '__resource.lua'];
+
+/** The manifest a resource folder actually has, or null if it is not one. */
+export function manifestIn(dir) {
+  for (const name of MANIFESTS) {
+    if (existsSync(join(dir, name))) return name;
+  }
+  return null;
+}
+
+/**
+ * Find a resource folder by name under a resources directory.
+ *
+ * Resources are nested inside `[category]` folders, sometimes two deep, so
+ * this walks rather than guessing a path — but only through bracket folders,
+ * which is what FiveM itself does.
+ */
+export async function findResourceDir(base, name, depth = 3) {
+  if (!existsSync(base)) throw new Error(`No such directory: ${base}`);
+  const wanted = String(name).toLowerCase();
+  const queue = [{ dir: base, level: 0 }];
+  while (queue.length) {
+    const { dir, level } = queue.shift();
+    let entries = [];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const full = join(dir, e.name);
+      if (e.name.toLowerCase() === wanted && manifestIn(full)) return full;
+      if (level < depth && /^\[.*\]$/.test(e.name)) queue.push({ dir: full, level: level + 1 });
+    }
+  }
+  return null;
+}
+
+/** Every resource folder under a base, by name. */
+export async function listResourceDirs(base, depth = 3) {
+  const found = [];
+  const queue = [{ dir: base, level: 0 }];
+  while (queue.length) {
+    const { dir, level } = queue.shift();
+    let entries = [];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const full = join(dir, e.name);
+      if (manifestIn(full)) { found.push({ name: e.name, dir: full }); continue; }
+      if (level < depth && /^\[.*\]$/.test(e.name)) queue.push({ dir: full, level: level + 1 });
+    }
+  }
+  return found.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Files inside a resource, relative to its root. Bounded, because a stream
+ * folder full of vehicle models would otherwise run away with it.
+ */
+async function walkResource(dir, { limit = 4000 } = {}) {
+  const out = [];
+  const queue = [''];
+  while (queue.length && out.length < limit) {
+    const rel = queue.shift();
+    let entries = [];
+    try {
+      entries = await readdir(join(dir, rel), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const child = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (e.name === 'node_modules' || e.name === '.git') continue;
+        queue.push(child);
+      } else if (out.length < limit) {
+        out.push(child);
+      }
+    }
+  }
+  return out;
+}
+
+function humanBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 async function findClientLog(explicit) {
@@ -466,6 +679,105 @@ export function createHandlers({ cfg, settings, redactor, secret }) {
             `${list.length} resource(s)${a.match ? ` matching ${a.match}` : ''}\n` +
             truncateMiddle(list.sort().join('\n'), cap).text
           );
+        }
+
+        case 'inspect': {
+          const base = a.dir ?? settings.resourcesDir ?? cfg.cwd;
+          if (!existsSync(base)) {
+            throw new Error(
+              `No such directory: ${base}. Point "dir" at the server's resources folder.`,
+            );
+          }
+          // A folder that is itself a resource is the obvious thing to accept.
+          const direct = manifestIn(base) ? base : null;
+
+          if (!a.resource && !direct) {
+            const all = await listResourceDirs(base);
+            if (!all.length) {
+              return (
+                `No resource folders under ${base}.\n` +
+                'Point "dir" at the resources directory, or name one with "resource".'
+              );
+            }
+            const rows = [];
+            for (const r of all) {
+              const name = manifestIn(r.dir);
+              const manifest = await readFile(join(r.dir, name), 'utf8').catch(() => '');
+              const files = await walkResource(r.dir, { limit: 400 });
+              const st = escrowStatus({ manifest, files });
+              const c = classifyResourceFiles(files, st.globs, { manifestName: name, escrowed: st.escrowed });
+              rows.push(
+                `${r.name.slice(0, 32).padEnd(34)}${escrowLabel(st).padEnd(14)}` +
+                `${String(c.readable.length).padStart(4)} readable` +
+                `${st.escrowed ? `, ${c.encrypted.length} encrypted` : ''}`,
+              );
+            }
+            const locked = rows.filter((r) => r.includes('ESCROWED')).length;
+            return (
+              `${all.length} resource(s) under ${base}, ${locked} escrowed\n` +
+              `${truncateMiddle(rows.join('\n'), cap).text}\n\n` +
+              'Inspect one before reading its files: fivem { action: "inspect", resource: "..." }'
+            );
+          }
+
+          const dir = direct ?? (await findResourceDir(base, a.resource));
+          if (!dir) {
+            throw new Error(
+              `No resource "${a.resource}" under ${base}. Action "inspect" with no resource ` +
+              'lists what is there; "dir" points somewhere else.',
+            );
+          }
+          const manifestName = manifestIn(dir);
+          const manifest = await readFile(join(dir, manifestName), 'utf8');
+          const clean = stripLuaComments(manifest);
+          const files = await walkResource(dir);
+          const st = escrowStatus({ manifest, files });
+          const { readable, encrypted, assets } = classifyResourceFiles(files, st.globs, { manifestName, escrowed: st.escrowed });
+
+          const name = a.resource ?? dir.split(/[\\/]/).filter(Boolean).pop();
+          const fxVersion = (clean.match(/fx_version\s*\(?\s*['"]([^'"]+)['"]/) ?? [])[1];
+          const game = (clean.match(/\bgame\s*\(?\s*['"]([^'"]+)['"]/) ?? [])[1];
+          const header =
+            `${name} — ${st.escrowed ? escrowLabel(st) : 'open: nothing is encrypted'}\n${dir}\n` +
+            `${manifestName}${fxVersion ? `, fx_version ${fxVersion}` : ''}${game ? `, game ${game}` : ''}\n`;
+
+          if (!st.escrowed) {
+            return (
+              `${header}${files.length} file(s), ${readable.length + encrypted.length} of them scripts — all readable.\n` +
+              'No escrow_ignore, no .fxap: read whatever you need.'
+            );
+          }
+
+          const sized = [];
+          for (const rel of readable.slice(0, 60)) {
+            const info = await stat(join(dir, rel)).catch(() => null);
+            sized.push(`  ${rel.slice(0, 44).padEnd(46)}${info ? humanBytes(info.size) : ''}`);
+          }
+
+          return truncateMiddle(
+            `${header}${st.signals.join('; ')}` +
+            `${st.certain
+              ? ''
+              : ' — but there is no .fxap, so this is probably the source copy, in which case ' +
+                'everything below is readable after all. Check one encrypted file before trusting the split'}\n\n` +
+            `readable — ${readable.length} file(s):\n${sized.join('\n')}` +
+            `${readable.length > 60 ? `\n  ... and ${readable.length - 60} more` : ''}\n\n` +
+            `${st.certain
+              ? `encrypted — ${encrypted.length} script(s), do not read:`
+              : `encrypted in the escrowed build — ${encrypted.length} script(s):`}\n` +
+            `  ${encrypted.slice(0, 40).join(', ')}` +
+            `${encrypted.length > 40 ? `, ... and ${encrypted.length - 40} more` : ''}\n` +
+            `${assets.length ? `\n${assets.length} other file(s) (models, images, data): not encrypted, rarely worth reading.\n` : ''}` +
+            `\n${st.certain
+              ? 'Read only what is in the readable list. The encrypted ones open fine and return ' +
+                'ciphertext: the tokens are spent and nothing is learned. If the config does not ' +
+                'answer the question, the exports and events declared in the manifest are the next ' +
+                'place to look, not the ciphertext.'
+              : 'Read one of those scripts before deciding: if it is plain Lua this is the source ' +
+                'copy and all of it is readable. If it is binary, treat the split above as real and ' +
+                'stay in the readable list.'}`,
+            cap,
+          ).text;
         }
 
         // ------------------------------------------------------------- RCON

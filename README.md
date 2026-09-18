@@ -680,10 +680,51 @@ about which is which.
 | Action | What it uses |
 | --- | --- |
 | `status`, `players`, `resources` | The public `/info.json`, `/players.json`, `/dynamic.json`. **No credentials at all.** |
+| `inspect` | The resource's own `fxmanifest.lua` (or `__resource.lua`), on disk. No server involved. |
 | `rcon`, `resource`, `say`, `kick` | RCON — the Quake-style UDP protocol, implemented here by hand. Needs `rcon_password` in `server.cfg`. |
 | `f8` | The game client's `CitizenFX.log`, which is where client-side `SCRIPT ERROR` lines land. |
 | `f8_exec`, `client_lua`, `server_lua` | The optional bridge resource (below). |
 | `tx_status`, `tx_control`, `tx_announce`, `tx_log` | txAdmin. |
+
+#### `inspect`: which files of a resource can actually be read
+
+Most paid FiveM resources ship through Cfx.re asset escrow. The scripts are
+encrypted, the server decrypts them at runtime, an `.fxap` file sits in the
+resource root, and the manifest lists under `escrow_ignore` the files the author
+left in the clear — normally the config and whatever is meant to be edited.
+
+That list is the entire readable surface of the resource, and nothing about
+reading the rest fails: `file_read` succeeds, bytes come back, and thousands of
+tokens buy ciphertext. `search_text` across the folder is worse, because it
+reads every encrypted file to match nothing.
+
+```
+fivem { action: "inspect", resource: "esx_policejob" }
+fivem { action: "inspect" }        every resource under the cwd, at a glance
+```
+
+```
+esx_policejob — ESCROWED
+D:\Server\resources\[esx]\esx_policejob
+fxmanifest.lua, fx_version cerulean, game gta5
+an .fxap file is present; escrow_ignore lists 3 pattern(s); it depends on '/assetpacks'
+
+readable — 5 file(s):
+  config.lua                                    4.7 KB
+  client/cl_open.lua                            1.0 KB
+  …
+encrypted — 4 script(s), do not read:
+  client/cl_main.lua, server/sv_main.lua, …
+```
+
+It distinguishes `ESCROWED` — an `.fxap` is present, so this build really is
+encrypted — from `ESCROW-READY`, where the manifest declares `escrow_ignore` but
+no `.fxap` is there, which is what the *source* copy looks like and is entirely
+readable. Claiming the first when it is the second would send someone hunting
+for ciphertext that does not exist, so it says which one it found and how to
+settle it.
+
+The skill tells the model to run this before opening any file of a resource.
 
 Two honest notes rather than marketing:
 
@@ -1125,7 +1166,7 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 932 assertions
+npm test                 # 971 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
@@ -1133,7 +1174,7 @@ npm run test:vars        # variables, interpolation, secrets, persistence    (67
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: real captures on a virtual X display (99)
 npm run test:input       # the input tool: real clicks and keys, witnessed by xev (104)
-npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (144)
+npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (183)
 npm run test:browser     # a real browser: 32 actions end to end, downloads  (130)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```

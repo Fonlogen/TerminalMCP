@@ -10,10 +10,9 @@ the screen itself — plus optional plugins for the places that work actually ge
 reported: Discord, Telegram, and FiveM servers. Built so the whole thing costs a
 fraction of the tokens a naive tool server burns.
 
-[![CI](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2018-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success)](package.json)
-[![Tests](https://img.shields.io/badge/tests-743%20assertions-success)](test)
+[![Tests](https://img.shields.io/badge/tests-828%20assertions-success)](test)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-635BFF)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)

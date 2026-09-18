@@ -641,16 +641,154 @@ async function xdotool(cfg, args, timeoutMs = 20000, env = {}) {
   return r.stdout;
 }
 
-async function osascript(cfg, script, timeoutMs = 20000) {
-  const r = await runArgv(cfg, { file: 'osascript', args: ['-e', script], timeoutMs });
+/**
+ * Pointer events on macOS, posted through CoreGraphics.
+ *
+ * The obvious route — `tell application "System Events" to click at {x, y}` —
+ * does not work. It is an accessibility command that asks the *application* to
+ * perform a click, and when the point does not resolve to a UI element it can
+ * simply never answer: the Apple event sits there until something kills it, no
+ * error, no TCC prompt, nothing on stderr. Accessibility being granted makes no
+ * difference, which is what makes it so confusing to diagnose.
+ *
+ * CGEventPost is what a click actually is: an event posted to the HID event
+ * tap, the same path a real mouse takes. No Apple events, nothing to wait for.
+ * JavaScript for Automation reaches it through the Objective-C bridge, so this
+ * needs nothing installed — `osascript -l JavaScript` ships with macOS.
+ */
+export function jxaPointerScript(op) {
+  // The payload is numbers and a button name — no free text reaches this
+  // script, so JSON is a safe JavaScript literal to paste into it.
+  const json = JSON.stringify(op);
+  return `let out;
+try {
+  ObjC.import('CoreGraphics');
+  ObjC.import('Foundation');
+  const o = ${json};
+  const P = (x, y) => ({ x: x, y: y });
+  const K = {
+    left:   { down: $.kCGEventLeftMouseDown,  up: $.kCGEventLeftMouseUp,  drag: $.kCGEventLeftMouseDragged,  b: $.kCGMouseButtonLeft },
+    right:  { down: $.kCGEventRightMouseDown, up: $.kCGEventRightMouseUp, drag: $.kCGEventRightMouseDragged, b: $.kCGMouseButtonRight },
+    middle: { down: $.kCGEventOtherMouseDown, up: $.kCGEventOtherMouseUp, drag: $.kCGEventOtherMouseDragged, b: $.kCGMouseButtonCenter },
+  };
+  const sleep = (ms) => $.NSThread.sleepForTimeInterval(ms / 1000);
+  const where = () => {
+    const p = $.CGEventGetLocation($.CGEventCreate($()));
+    return { x: Math.round(p.x), y: Math.round(p.y) };
+  };
+  const post = (type, x, y, button, clicks) => {
+    const e = $.CGEventCreateMouseEvent($(), type, P(x, y), button);
+    if (clicks) $.CGEventSetIntegerValueField(e, $.kCGMouseEventClickState, clicks);
+    $.CGEventPost($.kCGHIDEventTap, e);
+  };
+
+  if (o.op === 'position') {
+    out = { ok: true, at: where() };
+  } else if (o.op === 'move') {
+    const to = o.absolute ? P(o.x, o.y) : (() => { const c = where(); return P(c.x + o.dx, c.y + o.dy); })();
+    post($.kCGEventMouseMoved, to.x, to.y, $.kCGMouseButtonLeft, 0);
+    sleep(20);
+    out = { ok: true, at: { x: Math.round(to.x), y: Math.round(to.y) } };
+  } else if (o.op === 'click') {
+    const B = K[o.button] || K.left;
+    const at = o.absolute ? P(o.x, o.y) : where();
+    if (o.absolute) { post($.kCGEventMouseMoved, at.x, at.y, B.b, 0); sleep(30); }
+    for (let i = 1; i <= o.count; i++) {
+      post(B.down, at.x, at.y, B.b, i);
+      sleep(20);
+      post(B.up, at.x, at.y, B.b, i);
+      if (i < o.count) sleep(60);
+    }
+    out = { ok: true, at: { x: Math.round(at.x), y: Math.round(at.y) } };
+  } else if (o.op === 'drag') {
+    const B = K[o.button] || K.left;
+    const from = o.absolute ? P(o.x, o.y) : where();
+    post($.kCGEventMouseMoved, from.x, from.y, B.b, 0);
+    sleep(40);
+    post(B.down, from.x, from.y, B.b, 1);
+    sleep(60);
+    // Intermediate moves on purpose: a drag that teleports is ignored by
+    // anything that starts dragging on the first motion event.
+    for (let i = 1; i <= o.steps; i++) {
+      const nx = from.x + ((o.toX - from.x) * i) / o.steps;
+      const ny = from.y + ((o.toY - from.y) * i) / o.steps;
+      post(B.drag, nx, ny, B.b, 1);
+      sleep(12);
+    }
+    sleep(40);
+    post(B.up, o.toX, o.toY, B.b, 1);
+    out = { ok: true, at: { x: Math.round(o.toX), y: Math.round(o.toY) } };
+  } else if (o.op === 'scroll') {
+    if (o.absolute) { post($.kCGEventMouseMoved, o.x, o.y, $.kCGMouseButtonLeft, 0); sleep(20); }
+    const e = o.horizontal
+      ? $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 2, 0, -o.amount)
+      : $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 1, -o.amount);
+    $.CGEventPost($.kCGHIDEventTap, e);
+    out = { ok: true };
+  } else {
+    out = { ok: false, error: 'unknown pointer op ' + o.op };
+  }
+} catch (e) {
+  out = { ok: false, error: String((e && e.message) || e) };
+}
+JSON.stringify(out);`;
+}
+
+/** Run one of those, and turn whatever comes back into an answer or a reason. */
+async function jxaPointer(cfg, op, timeoutMs = 15000) {
+  const r = await runArgv(cfg, {
+    file: 'osascript',
+    args: ['-l', 'JavaScript', '-e', jxaPointerScript(op)],
+    timeoutMs,
+  });
   if (runFailed(r)) {
-    const denied = /not allowed|assistive|1743|accessibility/i.test(`${r.stderr}${r.stdout}`);
+    throw new Error(
+      `${describeRunFailure(r, 'osascript (JavaScript)')}\n` +
+      'This posts the event through CoreGraphics rather than asking an application to ' +
+      'click for itself. If it is refused, the process running this server needs ' +
+      'Accessibility permission: System Settings -> Privacy & Security -> Accessibility, ' +
+      'and the app to add is the one that launched the server (Terminal, iTerm, the Claude ' +
+      'app), not node. Installing cliclick (brew install cliclick) is the other way through.',
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(r.stdout.trim());
+  } catch {
+    throw new Error(`osascript answered something unexpected: ${r.stdout.trim().slice(0, 200)}`);
+  }
+  if (!parsed.ok) {
+    throw new Error(
+      `CoreGraphics refused the event: ${parsed.error}\n` +
+      'Install cliclick (brew install cliclick) and this tool will use it instead.',
+    );
+  }
+  return parsed;
+}
+
+async function osascript(cfg, script, timeoutMs = 20000) {
+  // An Apple event waits two minutes for a reply by default, so a System
+  // Events call that never answers looks exactly like a hang. Give it a
+  // deadline of its own, inside the script, so it comes back as an error.
+  const seconds = Math.max(2, Math.round((timeoutMs - 2000) / 1000));
+  const guarded = `with timeout of ${seconds} seconds\n${script}\nend timeout`;
+  const r = await runArgv(cfg, { file: 'osascript', args: ['-e', guarded], timeoutMs });
+  if (runFailed(r)) {
+    const both = `${r.stderr}${r.stdout}`;
+    const denied = /not allowed|assistive|1743|accessibility/i.test(both);
+    const timedOut = r.timedOut || /timed out|-1712/.test(both);
     throw new Error(
       denied
         ? 'macOS refused the input: this process needs Accessibility permission. ' +
-          'System Settings -> Privacy & Security -> Accessibility, and add the app running ' +
-          'this server (Terminal, iTerm, VS Code...). Nothing can be clicked or typed until then.'
-        : describeRunFailure(r, 'osascript'),
+          'System Settings -> Privacy & Security -> Accessibility, and add the app that ' +
+          'launched this server (Terminal, iTerm, the Claude app) — not node itself. ' +
+          'Nothing can be clicked or typed until then.'
+        : timedOut
+          ? `${describeRunFailure(r, 'osascript')}\n` +
+            'System Events accepted the command and never answered. That is not usually a ' +
+            'permission problem — a refusal is immediate and says so. Check with: ' +
+            `osascript -e 'tell application "System Events" to return UI elements enabled'`
+          : describeRunFailure(r, 'osascript'),
     );
   }
   return r.stdout;
@@ -706,16 +844,13 @@ export async function pointerPosition(cfg, { timeoutMs = 10000 } = {}) {
     return { x: Number(f.X), y: Number(f.Y) };
   }
   if (session === 'quartz') {
-    if (!onPath('cliclick')) {
-      throw new Error(
-        'macOS has no built-in way to report the pointer position. Install cliclick ' +
-        '(brew install cliclick) for it; clicking and typing work without it.',
-      );
+    if (onPath('cliclick')) {
+      const r = await runArgv(cfg, { file: 'cliclick', args: ['p'], timeoutMs });
+      if (runFailed(r)) throw new Error(describeRunFailure(r, 'cliclick'));
+      const [x, y] = r.stdout.trim().split(/[,\s]+/);
+      return { x: Number(x), y: Number(y) };
     }
-    const r = await runArgv(cfg, { file: 'cliclick', args: ['p'], timeoutMs });
-    if (runFailed(r)) throw new Error(describeRunFailure(r, 'cliclick'));
-    const [x, y] = r.stdout.trim().split(/[,\s]+/);
-    return { x: Number(x), y: Number(y) };
+    return (await jxaPointer(cfg, { op: 'position' }, timeoutMs)).at;
   }
   throw new Error(
     'Wayland does not tell an application where the pointer is, by design, and no helper ' +
@@ -764,10 +899,12 @@ export async function movePointer(cfg, { x = null, y = null, dx = 0, dy = 0, tim
       if (runFailed(r)) throw new Error(describeRunFailure(r, 'cliclick'));
       return absolute ? { x: Math.round(x), y: Math.round(y) } : pointerPosition(cfg, { timeoutMs });
     }
-    throw new Error(
-      'Moving the pointer without clicking needs cliclick on macOS (brew install cliclick). ' +
-      'A click at a position works without it — use action "click" with x and y.',
+    const moved = await jxaPointer(
+      cfg,
+      { op: 'move', absolute, x: Math.round(x ?? 0), y: Math.round(y ?? 0), dx: Math.round(dx), dy: Math.round(dy) },
+      timeoutMs,
     );
+    return moved.at;
   }
   const tool = waylandTool('pointer');
   const args = absolute
@@ -807,14 +944,12 @@ export async function clickPointer(cfg, { x = null, y = null, button = 'left', c
       if (runFailed(r)) throw new Error(describeRunFailure(r, 'cliclick'));
       return { x: at ? Math.round(x) : null, y: at ? Math.round(y) : null, button, count: times };
     }
-    if (!at) throw new Error('Clicking where the pointer already is needs cliclick on macOS (brew install cliclick).');
-    if (button !== 'left') {
-      throw new Error('Only a left click can be done with the built-in tools on macOS; a right click needs cliclick (brew install cliclick).');
-    }
-    for (let i = 0; i < times; i++) {
-      await osascript(cfg, `tell application "System Events" to click at {${Math.round(x)}, ${Math.round(y)}}`, timeoutMs);
-    }
-    return { x: Math.round(x), y: Math.round(y), button, count: times };
+    const clicked = await jxaPointer(
+      cfg,
+      { op: 'click', absolute: at, x: Math.round(x ?? 0), y: Math.round(y ?? 0), button, count: times },
+      timeoutMs,
+    );
+    return { x: clicked.at?.x ?? null, y: clicked.at?.y ?? null, button, count: times };
   }
   const tool = waylandTool('pointer');
   if (at) await movePointer(cfg, { x, y, timeoutMs });
@@ -859,7 +994,12 @@ export async function dragPointer(cfg, { x = null, y = null, toX, toY, button = 
   }
   if (session === 'quartz') {
     if (!onPath('cliclick')) {
-      throw new Error('Dragging on macOS needs cliclick (brew install cliclick): the built-in tools can click, but not press, move and release.');
+      await jxaPointer(
+        cfg,
+        { op: 'drag', absolute: true, x: from.x, y: from.y, toX: Math.round(toX), toY: Math.round(toY), button, steps: n },
+        timeoutMs,
+      );
+      return { from, to: { x: Math.round(toX), y: Math.round(toY) }, button };
     }
     const r = await runArgv(cfg, {
       file: 'cliclick',
@@ -895,15 +1035,12 @@ export async function scrollWheel(cfg, { x = null, y = null, amount = 3, horizon
     return { amount: clicks, horizontal };
   }
   if (session === 'quartz') {
-    if (at) await movePointer(cfg, { x, y, timeoutMs });
-    await osascript(
+    await jxaPointer(
       cfg,
-      `tell application "System Events" to key code ${clicks > 0 ? 121 : 116} repeat ${Math.abs(clicks)}`,
+      { op: 'scroll', absolute: at, x: Math.round(x ?? 0), y: Math.round(y ?? 0), amount: clicks, horizontal },
       timeoutMs,
-    ).catch(() => {
-      throw new Error('macOS has no built-in way to turn the wheel; page up/down is the closest, and it needs a focused window.');
-    });
-    return { amount: clicks, horizontal, note: 'sent as page down/up: macOS has no built-in wheel event' };
+    );
+    return { amount: clicks, horizontal };
   }
   const tool = waylandTool('pointer');
   const r = await runArgv(cfg, { file: tool, args: ['mousemove', '--wheel', '--', '0', String(clicks)], timeoutMs });
@@ -1088,8 +1225,45 @@ export async function inputProbe(cfg, { timeoutMs = 20000 } = {}) {
 
   if (session === 'quartz') {
     lines.push(
-      `cliclick: ${onPath('cliclick') ? 'installed (full pointer control)' : 'not installed — clicks and typing work, pointer moves and drags do not'}`,
-      'Accessibility permission is required for anything here; macOS asks once, and refuses silently until granted.',
+      `cliclick: ${onPath('cliclick') ? 'installed — used for the pointer' : 'not installed (optional: CoreGraphics is used instead)'}`,
+      'pointer events: CGEventPost through osascript -l JavaScript',
+      'keyboard and focus: System Events',
+    );
+
+    // The Accessibility flag, asked the way AppleScript itself asks it. A
+    // refusal here is immediate, which is the point: a hang means something
+    // else is wrong.
+    try {
+      const enabled = (await osascript(cfg, 'tell application "System Events" to return UI elements enabled', 8000)).trim();
+      lines.push(`Accessibility (UI elements enabled): ${enabled || 'no answer'}`);
+    } catch (err) {
+      lines.push(`Accessibility check FAILED: ${err.message.split('\n')[0]}`);
+    }
+
+    // The real test: post an event and see whether the pointer moved.
+    try {
+      const before = await pointerPosition(cfg, { timeoutMs });
+      lines.push(`pointer now at: ${before.x},${before.y}`);
+      await movePointer(cfg, { x: before.x + 1, y: before.y, timeoutMs });
+      const after = await pointerPosition(cfg, { timeoutMs });
+      await movePointer(cfg, { x: before.x, y: before.y, timeoutMs });
+      lines.push(
+        after.x !== before.x
+          ? 'one-pixel test move: ok — injected input works on this machine'
+          : 'one-pixel test move: the event was accepted but the pointer did not move. ' +
+            'That is what a missing Accessibility grant looks like from here: macOS drops ' +
+            'posted events silently rather than refusing them.',
+      );
+    } catch (err) {
+      lines.push(`one-pixel test move FAILED: ${err.message}`);
+    }
+
+    lines.push(
+      '',
+      'Accessibility must be granted to the application that launched this server — the ' +
+      'terminal, the editor, or the Claude app — not to node, which inherits it. If clicks ' +
+      'do nothing, that grant is the first thing to check, and toggling it off and on again ' +
+      'is what usually makes macOS notice a rebuilt binary.',
     );
     return lines.join('\n');
   }

@@ -612,6 +612,33 @@ Wayland refuses input injection by design; there `ydotool` (pointer, via
 `/dev/uinput`) and `wtype` (keyboard) are the way through, and `probe` says
 which of them is installed. An X11 session needs only `xdotool`.
 
+#### macOS: why the pointer does not go through AppleScript
+
+The obvious route is `tell application "System Events" to click at {x, y}`, and
+it is a trap. That is an accessibility command asking the *application* to click
+for itself; when the coordinates resolve to no UI element it can simply never
+answer. The Apple event sits there until something kills it — no error, no
+refusal, nothing on stderr, and no TCC prompt. Granting Accessibility does not
+change it, which is what makes it so hard to diagnose: every permission looks
+correct and the call still hangs.
+
+So the pointer goes through `CGEventPost` instead — the same path a real mouse
+takes — reached with `osascript -l JavaScript` and the Objective-C bridge, which
+ships with macOS. Nothing to install. `cliclick` is still used when it is
+present, because it is battle-tested, but it is no longer required for moves or
+drags.
+
+Accessibility is still needed, and it belongs to **the application that launched
+the server** — the terminal, the editor, the Claude app — not to `node`, which
+merely inherits it. When the grant is missing, macOS does not refuse a posted
+event: it drops it silently. `probe` therefore posts a one-pixel move and checks
+whether the pointer actually moved, which is the only way to tell the two apart
+from the outside.
+
+Everything still on System Events — typing, key chords, raising a window — now
+carries `with timeout of`, so a hung Apple event comes back as an error rather
+than as twenty seconds of silence.
+
 Every failure the Windows side can hit comes back named rather than as a
 generic "capture failed": no interactive desktop, a temp directory that cannot
 be written, a `pwsh` install without the Windows Desktop runtime, a minimized
@@ -1166,14 +1193,14 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 971 assertions
+npm test                 # 990 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: real captures on a virtual X display (99)
-npm run test:input       # the input tool: real clicks and keys, witnessed by xev (104)
+npm run test:input       # the input tool: real clicks and keys, witnessed by xev (123)
 npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (183)
 npm run test:browser     # a real browser: 32 actions end to end, downloads  (130)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
@@ -1259,7 +1286,7 @@ signposted rather than discovered.
 | **MCP protocol** | 2024-11-05, 2025-03-26, 2025-06-18 (negotiated per session) |
 | **Browser control** | Chrome, Chromium, Edge, Brave, Vivaldi — anything Chromium-family, on all three platforms. Not Firefox: it dropped most of its CDP surface in favour of WebDriver BiDi, which is a different protocol. |
 | **Desktop capture** | Windows: PowerShell + System.Drawing, nothing to install — but it must run in the interactive desktop session, and `screen { action: "probe" }` says whether it does. macOS: `screencapture`, built in. Linux: whichever of `grim` (Wayland), `maim`, `import`, `scrot`, `spectacle`, `gnome-screenshot` is present — `--doctor` says which it found and what to install if none. |
-| **Mouse and keyboard** | Windows: `SendInput` through PowerShell, nothing to install. X11: `xdotool`. macOS: `osascript`, plus `cliclick` for pointer moves and drags. Wayland: `ydotool` and `wtype`, because the compositor allows nothing else. `input { action: "probe" }` says what is available. |
+| **Mouse and keyboard** | Windows: `SendInput` through PowerShell, nothing to install. X11: `xdotool`. macOS: `CGEventPost` through `osascript -l JavaScript`, also nothing to install (`cliclick` is used when present). Wayland: `ydotool` and `wtype`, because the compositor allows nothing else. `input { action: "probe" }` says what is available and tests it. |
 | **Plugins** | Platform-independent: HTTPS and UDP. The FiveM client log that `f8` reads is Windows-only, because the FiveM client is. |
 
 The browser paths are tested on Linux against a real Chromium, and the Windows

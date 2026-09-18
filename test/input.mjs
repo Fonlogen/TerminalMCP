@@ -10,7 +10,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
@@ -21,6 +21,7 @@ import {
   describeChord,
   parseChord,
   parseChords,
+  jxaPointerScript,
   xdotoolChord,
   WINDOWS_INPUT_SCRIPT,
 } from '../src/input.js';
@@ -240,6 +241,53 @@ async function main() {
       check('the explainer speaks for input, not capture',
         /^Input failed/.test(explainWindowsFailure({ stage: 'zzz', message: 'x' }, { what: 'Input' })),
         explainWindowsFailure({ stage: 'zzz', message: 'x' }, { what: 'Input' }));
+    }
+
+    console.log('\n--- macOS: the pointer goes through CoreGraphics, not System Events ---');
+    {
+      // `tell application "System Events" to click at {x, y}` asks the target
+      // application to click for itself, and when the point resolves to no UI
+      // element it can simply never answer — no error, no refusal, just an
+      // Apple event that hangs until something kills it. It must not come back.
+      const source = await readFile(new URL('../src/input.js', import.meta.url), 'utf8');
+      // Comments may name the old call — explaining it is the point. Code may not.
+      const code = source
+        .split('\n')
+        .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+        .join('\n');
+      check('nothing clicks through System Events any more', !/click at \{/.test(code),
+        (code.match(/.*click at \{.*/) ?? [''])[0]);
+
+      const click = jxaPointerScript({ op: 'click', absolute: true, x: 470, y: 930, button: 'right', count: 2 });
+      check('a click posts a CGEvent', /CGEventPost/.test(click) && /CGEventCreateMouseEvent/.test(click), click.slice(0, 120));
+      check('...to the HID event tap, where a real mouse posts', /kCGHIDEventTap/.test(click));
+      check('...with the coordinates asked for', /"x":470/.test(click) && /"y":930/.test(click), click.slice(0, 300));
+      check('...the button asked for', /"button":"right"/.test(click));
+      check('...and the click count, so a double click is one', /"count":2/.test(click) && /kCGMouseEventClickState/.test(click));
+      check('it imports CoreGraphics itself', /ObjC\.import\('CoreGraphics'\)/.test(click));
+      check('it answers in JSON rather than by exit code', /JSON\.stringify\(out\)/.test(click));
+      check('...and reports a failure instead of throwing at osascript', /ok: false, error/.test(click));
+
+      const move = jxaPointerScript({ op: 'move', absolute: false, dx: 10, dy: -5 });
+      check('a relative move carries its offsets', /"dx":10/.test(move) && /"dy":-5/.test(move));
+      check('...and moves rather than clicks', /kCGEventMouseMoved/.test(move));
+
+      const drag = jxaPointerScript({ op: 'drag', absolute: true, x: 1, y: 2, toX: 30, toY: 40, button: 'left', steps: 12 });
+      check('a drag presses, moves and releases', /kCGEventLeftMouseDown/.test(drag) && /drag/.test(drag) && /kCGEventLeftMouseUp/.test(drag));
+      check('...in steps, so it is not a teleport', /o\.steps/.test(drag) && /"steps":12/.test(drag));
+
+      const scroll = jxaPointerScript({ op: 'scroll', absolute: false, amount: 3, horizontal: false });
+      check('scrolling is a real wheel event', /CGEventCreateScrollWheelEvent/.test(scroll));
+      check('...in lines, the unit a wheel click is', /kCGScrollEventUnitLine/.test(scroll));
+
+      check('every op the code sends is handled by the script',
+        ['position', 'move', 'click', 'drag', 'scroll'].every((op) => jxaPointerScript({ op }).includes(`o.op === '${op}'`)));
+
+      // Anything still going through System Events must carry a deadline: an
+      // Apple event waits two minutes by default, which reads as a hang.
+      check('System Events calls are given a timeout of their own', /with timeout of \$\{seconds\} seconds/.test(source), 'no with-timeout guard');
+      check('...and a hang is explained as such', /never answered/.test(source));
+      check('...pointing at the one-liner that settles it', /UI elements enabled/.test(source));
     }
 
     console.log('\n--- arguments and guards ---');

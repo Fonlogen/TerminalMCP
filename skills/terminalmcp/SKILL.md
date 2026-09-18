@@ -552,6 +552,12 @@ Three things to get right:
 If nothing happens in a game, that is expected rather than broken: anti-cheat
 can refuse injected input, and no option changes it. Say so instead of retrying.
 
+On macOS, if clicks do nothing while `focus` works, run `input { action:
+"probe" }`. Accessibility belongs to the app that launched the server — the
+terminal, the editor, the Claude app — not to node, and without it macOS drops
+posted events silently rather than refusing them. The probe posts a one-pixel
+move and says which of the two it is.
+
 ## Optional integrations
 
 Some setups also expose `fivem`, `discord` or `telegram`. They are off by

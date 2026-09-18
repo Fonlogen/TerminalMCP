@@ -1,6 +1,6 @@
 ---
 name: terminalmcp-fivem
-description: Operate a FiveM or RedM server through the TerminalMCP `fivem` tool — check status and players with no credentials, run console commands over RCON, start and restart resources, kick players, read the F8 client console log where client script errors actually appear, drive txAdmin, and (with the optional bridge resource) run commands in a player's F8 console or evaluate Lua on the server. Use whenever the `fivem` tool is available and the task involves a FiveM/RedM server, a resource that is misbehaving, txAdmin, RCON, or the F8 console.
+description: Operate a FiveM or RedM server through the TerminalMCP `fivem` tool — check status and players with no credentials, run console commands over RCON, start and restart resources, kick players, read the F8 client console log where client script errors actually appear, drive txAdmin, check which of a resource's files are actually readable before spending tokens on encrypted ones, and (with the optional bridge resource) run commands in a player's F8 console or evaluate Lua on the server. Use whenever the `fivem` tool is available and the task involves a FiveM/RedM server, a resource that is misbehaving, txAdmin, RCON, or the F8 console.
 ---
 
 # FiveM through TerminalMCP
@@ -130,7 +130,47 @@ The usual shape of the task, in the cheapest order:
 4. Server-side errors → `tx_log { match: "error" }`, or `shell_job` output.
 5. Client-side errors → `f8 { errors: true }`.
 6. Still unclear → `server_lua` / `client_lua` to inspect actual state.
-7. Read the code with `search_text` and `file_read`, not by guessing.
+7. Read the code with `search_text` and `file_read`, not by guessing — but
+   first read the section below. Half the paid resources on a server cannot be
+   read at all.
+
+## Before reading a resource's code: check for escrow
+
+**Always run `inspect` before opening any file of a resource.**
+
+```
+fivem { action: "inspect", resource: "esx_policejob" }
+fivem { action: "inspect" }        every resource under the server cwd, at a glance
+```
+
+Most paid FiveM resources ship through Cfx.re asset escrow: the scripts are
+encrypted, the server decrypts them at runtime, and an `.fxap` file sits in the
+resource root. The manifest — `fxmanifest.lua`, or `__resource.lua` on legacy
+resources — then lists under `escrow_ignore` the files the author left in the
+clear, normally the config and whatever is meant to be edited.
+
+**That list is the entire readable surface of the resource.** Everything else is
+ciphertext, and it does not announce itself: `file_read` succeeds, bytes come
+back, and thousands of tokens buy noise. `search_text` over the folder is worse
+— it reads every encrypted file to match nothing.
+
+`inspect` does the reading for you and answers with two lists:
+
+- **readable** — the manifest plus everything `escrow_ignore` matches. Read
+  these.
+- **encrypted** — every other script. Do not open them, and do not grep them.
+
+It also distinguishes `ESCROWED` (an `.fxap` is present: the build in front of
+you really is encrypted) from `ESCROW-READY` (the manifest declares
+`escrow_ignore` but there is no `.fxap`, so this is probably the source copy and
+all of it is readable). When it says ESCROW-READY, read one of the listed
+scripts to settle it: plain Lua means source, binary means escrow.
+
+When the answer is not in the readable files, say so rather than fishing. The
+`exports`, events and dependencies declared in the manifest describe the
+interface without any of the implementation, and the resource's own
+documentation is usually the rest. Decompiling escrowed assets is not something
+to attempt or suggest.
 
 ## Things that will bite you
 
@@ -141,7 +181,10 @@ The usual shape of the task, in the cheapest order:
 - **`allowCommands` / `denyCommands`** may be configured by the operator. A
   refusal comes back as `Policy: …` — report it, do not try to route around it.
 - **`readOnly`** blocks `rcon`, `say`, `kick`, `resource`, `tx_control` and the
-  Lua actions. `status`, `players`, `resources`, `f8` and `tx_status` still work.
+  Lua actions. `status`, `players`, `resources`, `inspect`, `f8` and `tx_status`
+  still work.
+- **An escrowed resource looks readable and is not.** `file_read` on an
+  encrypted script returns bytes and burns tokens. `inspect` first, every time.
 - **Restarting a live server kicks everyone off it.** It is a real server with
   real people on it. Say what you are about to do before you do it, and prefer
   `say` a warning first.

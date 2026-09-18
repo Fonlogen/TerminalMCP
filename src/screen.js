@@ -25,7 +25,8 @@ import { describeRunFailure, runArgv, runFailed } from './exec.js';
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 
-function onPath(name) {
+/** Absolute path of a program on PATH, or null. Shared with the input tools. */
+export function onPath(name) {
   const dirs = (process.env.PATH || '').split(IS_WIN ? ';' : ':').filter(Boolean);
   const exts = IS_WIN ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';') : [''];
   for (const dir of dirs) {
@@ -420,7 +421,8 @@ async function windowsScript() {
   return p;
 }
 
-function powershell() {
+/** pwsh when it is installed, Windows PowerShell otherwise. Shared with input. */
+export function powershell() {
   return onPath('pwsh') ? 'pwsh' : 'powershell';
 }
 
@@ -462,7 +464,7 @@ export function findWindowsError(stdout = '') {
 }
 
 /** Turn that report into something the reader can act on. */
-export function explainWindowsFailure(err) {
+export function explainWindowsFailure(err, { what = 'Screen capture' } = {}) {
   const stage = err?.stage ?? '';
   const type = err?.type && err.type !== 'none' ? err.type : '';
   const message = (err?.message ?? '').trim();
@@ -495,6 +497,10 @@ export function explainWindowsFailure(err) {
       );
     case 'compile':
       return `PowerShell could not compile the helper this tool uses to reach user32: ${raw}.`;
+    case 'layout':
+      // Which physical key produces a character depends on the active keyboard
+      // layout, and only the machine holding the keyboard knows it.
+      return `${message || raw}`;
     case 'unexpected':
       // A type initializer blowing up is what a broken or absent GDI+ looks
       // like from here, so treat it as the assembly problem it is.
@@ -502,7 +508,7 @@ export function explainWindowsFailure(err) {
         return explainWindowsFailure({ ...err, stage: 'assemblies' });
       }
       return (
-        `Screen capture failed in a way this tool did not anticipate: ${raw}.\n` +
+        `${what} failed in a way this tool did not anticipate: ${raw}.\n` +
         'Run screen { action: "probe" }: it reports the PowerShell version, the window ' +
         'station and a one-pixel test capture, which usually names the real cause.'
       );
@@ -514,9 +520,9 @@ export function explainWindowsFailure(err) {
       return `That screenshot path cannot be used: ${raw}.`;
     case 'geometry':
     case 'args':
-      return message || raw || `Screen capture was asked for something impossible (${stage}).`;
+      return message || raw || `${what} was asked for something impossible (${stage}).`;
     default:
-      return `Screen capture failed${stage ? ` at stage "${stage}"` : ''}: ${raw || 'no detail was reported'}`;
+      return `${what} failed${stage ? ` at stage "${stage}"` : ''}: ${raw || 'no detail was reported'}`;
   }
 }
 

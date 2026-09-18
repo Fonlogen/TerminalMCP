@@ -17,6 +17,7 @@ import * as data from './data.js';
 import * as watch from './watch.js';
 import * as browser from './browser.js';
 import * as screen from './screen.js';
+import * as input from './input.js';
 import * as varsTool from './vars.js';
 
 /** Group modules export TOOLS + createHandlers; normalise that shape here. */
@@ -50,6 +51,7 @@ export const GROUPS = {
   watch: group('watch paths for changes', watch),
   browser: group('drive a real browser: navigate, read, click, screenshot', browser),
   screen: group('screenshot the desktop, a window or a region; view images', screen),
+  input: group('move the mouse, click, drag, type, press keys', input),
 };
 
 export const GROUP_NAMES = Object.keys(GROUPS);
@@ -64,6 +66,8 @@ export const ALIASES = {
   ops: ['core', 'search', 'fs', 'sys', 'net', 'archive'],
   // Looking at things: a web app under test, or whatever is on screen.
   web: ['core', 'browser', 'screen', 'net', 'search', 'fs'],
+  // Driving a GUI that has no other way in: see it, then act on it.
+  desktop: ['core', 'screen', 'input', 'fs', 'search'],
 };
 
 export const DEFAULT_PROFILE = 'all';

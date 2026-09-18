@@ -59,6 +59,7 @@ GOOD: shell_bulk { steps: [
 | Keep a value for later without re-sending it | `vars`, or `assign` on shell_exec / http_request / bulk |
 | Load a web page and act on it | `browser` |
 | See what a page looks like, or what is on screen | `browser` action `screenshot`, `screen` action `shot` |
+| Click or type in an app that has no CLI | `input` actions `click`, `type`, `key` — with `shot: true` |
 | Look at an image file | `screen` action `view` |
 | Which OS / shell / profile am I on | `shell_info` |
 | Tell a person the work is done | `discord` / `telegram`, if those tools are present |
@@ -522,6 +523,34 @@ Three things to keep in mind:
 `view` is worth remembering for its own sake: it turns any png/jpeg/gif/webp on
 disk into something you can actually look at — a screenshot from earlier in the
 task, a chart a script just produced, a mockup the user pointed you at.
+
+## Clicking and typing
+
+When an app has no command-line way in, `input` is it. The loop is: see it, act,
+see the result — and `shot: true` collapses the last two into one call.
+
+```
+screen { action: "windows" }                        what is open, and where
+input  { action: "click", x: 812, y: 455, window: "Setup", shot: true }
+input  { action: "type", text: "D:\Games\server" }
+input  { action: "key", keys: "enter", shot: true }
+input  { action: "key", keys: "w", hold_ms: 800 }   held, not tapped
+```
+
+Three things to get right:
+
+- **Pass `window`** whenever you know which window you mean. Input goes where
+  the focus is, and the focus is not always where you think — typing a password
+  into the wrong window is the failure mode here, and it is not recoverable.
+- **Read the coordinates from `screen`**, never guess them. `windows` gives each
+  window's position and size; `shot` shows you what is inside it. Clicking a
+  remembered coordinate after the window moved clicks on something else.
+- **`type` for text, `key` for keys.** `type` sends characters, so accents and
+  any keyboard layout work. `key` takes chords (`ctrl+s`, `alt+f4`) and
+  sequences (`alt+f x`, in order).
+
+If nothing happens in a game, that is expected rather than broken: anti-cheat
+can refuse injected input, and no option changes it. Say so instead of retrying.
 
 ## Optional integrations
 

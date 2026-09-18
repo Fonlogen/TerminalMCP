@@ -239,6 +239,35 @@ export async function runCommand(cfg, opts) {
  * `ps`) use: an argv array cannot be mangled by quoting rules, so a commit
  * message with quotes, spaces and newlines just works, on every platform.
  */
+/**
+ * Did this run fail?
+ *
+ * A run carries `exitCode`, not `code`. Reading the wrong one is always true,
+ * which silently turns every success into a failure whose message is the output
+ * it was supposed to return — and the reader then blames the program, not the
+ * check. That happened, across every desktop-capture path; this exists so the
+ * question is asked in one place that a test can hold on to.
+ */
+export function runFailed(run) {
+  return Boolean(run.error) || run.timedOut === true || run.exitCode !== 0;
+}
+
+/** Why it failed, with each stream labelled instead of pasted together. */
+export function describeRunFailure(run, what = 'the command') {
+  const head = (text, n) => text.trim().split(/\r?\n/).slice(0, n).join(' ');
+  const lines = [];
+  if (run.error) lines.push(`${what} could not be started: ${run.error}`);
+  else if (run.timedOut) lines.push(`${what} was still running after ${run.timeoutMs}ms and was killed`);
+  else lines.push(`${what} exited with code ${run.exitCode ?? 'unknown'}`);
+
+  const err = (run.stderr || '').trim();
+  const out = (run.stdout || '').trim();
+  if (err) lines.push(`stderr: ${head(err, 4)}`);
+  if (out) lines.push(`stdout: ${head(out, 4)}`);
+  if (!err && !out) lines.push('and printed nothing at all');
+  return lines.join('\n');
+}
+
 export function startArgv(cfg, opts) {
   const {
     file,

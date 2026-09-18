@@ -455,6 +455,20 @@ browser { action: "eval", expression: "store.getState().user" }
 When something on a page does not behave, `console` and `network` usually
 answer it in one call — much cheaper than screenshotting and squinting.
 
+### Downloading a file
+
+```
+browser { action: "download", url: "https://site/pack.zip" }   fetch and wait
+browser { action: "download", text: "Download" }               click a link or button
+browser { action: "downloads" }                                what came down, and where
+```
+
+Use this rather than `http_request` whenever the file is behind a login: the
+browser already holds the session, so nothing has to be re-authenticated. It
+blocks until the file is written and tells you the path, so the next step can
+read it straight away. A URL that turns out to be a page rather than a file
+says so instead of waiting out the timeout.
+
 `eval` takes an expression (`document.title`, `({a: 1})`) or a body with a
 `return`. It awaits promises.
 
@@ -483,9 +497,10 @@ screen { action: "shot", mode: "region", x: 0, y: 0, width: 900, height: 240 }
 screen { action: "displays" }    what monitors exist, and the coordinate space
 screen { action: "windows" }     what windows are open, largest first
 screen { action: "view", path: "designs/mockup.png" }   look at any image on disk
+screen { action: "probe" }       whether capture can work here, and why not
 ```
 
-Two things to keep in mind:
+Three things to keep in mind:
 
 - **A full-screen capture shows everything on screen**, including windows that
   have nothing to do with the task. When you only need one thing, use
@@ -495,6 +510,14 @@ Two things to keep in mind:
   SSH, `screen` will tell you there is no graphical session. That is not a
   fault to work around: if you need a picture of a web page, use
   `browser screenshot`, which renders headlessly and needs no display.
+- **If `displays` and `windows` work but every `shot` fails, run
+  `probe` before trying anything else.** On Windows that pattern means the
+  server is not in the interactive desktop session — a service, a scheduled
+  task or an SSH login can enumerate windows but cannot copy pixels, and no
+  choice of mode will change that. `probe` names the cause (window station,
+  session id, a one-pixel test capture) so you can say what the user has to
+  change instead of retrying. Report it and move on; `browser screenshot`
+  still works for anything that is a web page.
 
 `view` is worth remembering for its own sake: it turns any png/jpeg/gif/webp on
 disk into something you can actually look at — a screenshot from earlier in the

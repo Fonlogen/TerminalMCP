@@ -10,10 +10,9 @@ the screen itself — plus optional plugins for the places that work actually ge
 reported: Discord, Telegram, and FiveM servers. Built so the whole thing costs a
 fraction of the tokens a naive tool server burns.
 
-[![CI](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Fonlogen/TerminalMCP/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2018-5FA04E?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success)](package.json)
-[![Tests](https://img.shields.io/badge/tests-743%20assertions-success)](test)
+[![Tests](https://img.shields.io/badge/tests-828%20assertions-success)](test)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-635BFF)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -493,6 +492,7 @@ DevTools Protocol.
 | Interaction | `click`, `type`, `fill`, `press`, `hover`, `scroll`, `select` |
 | Waiting | `wait` for a selector, text, its disappearance, a lifecycle state, network idle, or just a delay |
 | Capture | `screenshot` (viewport, `full_page`, or one element — returned inline so the model can see it), `pdf` |
+| Files | `download` (a URL, or a link/button to click) waits for the file and reports where it landed; `downloads` lists them |
 | State | `cookies`, `cookie_set`, `cookies_clear` |
 | Diagnostics | `console` (filterable by level), `network` (filterable by URL, or `failed: true` for just the problems) |
 
@@ -502,6 +502,32 @@ element by what it says. Ambiguous text prefers the thing you can act on and
 the innermost match, so `text: "Sign in"` picks the button rather than the
 heading above it that says the same words.
 
+#### Downloads
+
+A download is the one thing a browser does that produces no page, which is why
+it used to look broken: navigating to a file URL aborts its own navigation —
+Chromium hands the bytes to the download manager and no document is ever
+committed — so `navigate` reported a failure while the file was, in fact,
+arriving.
+
+```
+browser { action: "download", url: "https://example.com/pack.zip" }
+browser { action: "download", text: "Download release" }     a link or button
+browser { action: "download" }                    just wait for what the page started
+browser { action: "downloads", wait: true }
+```
+
+`download` blocks until the file is on disk and answers with its real name,
+its size and its path. The point is the session: a file behind a login comes
+down with the cookies the browser already has, which is the whole reason not to
+reach for `http_request`. `navigate` now recognises a download too, instead of
+reporting a navigation failure.
+
+Files land in `.terminalmcp/downloads` (configurable with `browser.downloadDir`),
+named by what the server suggested — sanitised, because a `Content-Disposition`
+filename is attacker-controlled input, and never overwriting: a second
+`pack.zip` becomes `pack (2).zip`.
+
 Browsers are found automatically: the usual install locations per platform,
 then `$CHROME_PATH`, then a Playwright or Puppeteer cache if you already have
 one on disk. Nothing is downloaded.
@@ -510,10 +536,34 @@ one on disk. Nothing is downloaded.
 
 | Tool | Purpose |
 | --- | --- |
-| `screen` | `shot` captures the whole desktop, one monitor (`mode: "display"`), one window matched on its title (`mode: "window"`), or an exact rectangle (`mode: "region"`). `view` shows any image file on disk — png, jpeg, gif, webp — so the model can look at a screenshot from ten minutes ago or a mockup someone dropped in a folder. `displays` and `windows` list what there is to capture. |
+| `screen` | `shot` captures the whole desktop, one monitor (`mode: "display"`), one window matched on its title (`mode: "window"`), or an exact rectangle (`mode: "region"`). `view` shows any image file on disk — png, jpeg, gif, webp — so the model can look at a screenshot from ten minutes ago or a mockup someone dropped in a folder. `displays` and `windows` list what there is to capture. `probe` says whether capture can work here at all, and why not. |
 
 Captures are saved at full resolution and shown scaled to `max_width`, so the
 file on disk stays the good copy while the reply stays cheap.
+
+#### When every shot fails but `displays` and `windows` work
+
+That combination is not a broken tool — it is the signature of a process that
+can see the desktop's furniture but not its pixels. Enumerating monitors and
+windows works from any session; copying pixels needs the **interactive
+desktop**, which a Windows service, a scheduled task, session 0 and an
+SSH/WinRM login do not have.
+
+```
+screen { action: "probe" }
+```
+
+reports the window station (only `WinSta0` can capture), the Windows session
+id, the PowerShell version, and the result of a one-pixel test capture with the
+exact exception — then tries a real 8×8 capture end to end. The fix is almost
+always to start the server from a terminal inside your own logged-in session.
+
+Every failure the Windows side can hit comes back named rather than as a
+generic "capture failed": no interactive desktop, a temp directory that cannot
+be written, a `pwsh` install without the Windows Desktop runtime, a minimized
+window (pass `activate: true`), a title that matches nothing. And a web page
+never needs a desktop at all — `browser screenshot` renders headlessly,
+including the full scrolling page.
 
 ---
 
@@ -883,9 +933,11 @@ knowing exactly how far.
 - macOS will ask for permission the first time: Screen Recording for captures,
   Accessibility for listing windows. Nothing can be captured until you grant
   it, and the error says so rather than returning a black image.
-- The `screen` tool needs a desktop. On a server, in a container or over plain
-  SSH there is nothing to capture, and it says so — browser screenshots still
-  work there, because they render headlessly.
+- The `screen` tool needs a desktop, and on Windows specifically the
+  *interactive* one: a service or an SSH login can list windows but not copy
+  pixels. `screen { action: "probe" }` says which case you are in. On a server,
+  in a container or over plain SSH there is nothing to capture, and it says so —
+  browser screenshots still work there, because they render headlessly.
 
 ### Plugins reach outside the machine
 
@@ -1018,15 +1070,15 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 743 assertions
+npm test                 # 828 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
 npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
-npm run test:screen      # the screen tool: view, guards, honest failure     (30)
+npm run test:screen      # the screen tool: real captures on a virtual X display (99)
 npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (144)
-npm run test:browser     # a real browser: 30 actions end to end            (114)
+npm run test:browser     # a real browser: 32 actions end to end, downloads  (130)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```
 
@@ -1044,11 +1096,14 @@ received the values. Two parts degrade honestly instead of pretending:
 
 - **No browser installed** — the browser suite reports that and exits 0. A
   missing browser is a missing browser, not a broken server.
-- **No desktop** — desktop capture cannot be exercised on a headless machine,
-  so what is testable there is tested: the PNG codec, the token maths, and the
-  decision table that picks a capture back end (which tool for X11 versus
-  Wayland, which ones cannot target a window, what to suggest installing).
-  The capture commands themselves are only exercised where there is a screen.
+- **No desktop** — when `Xvfb` is installed, the screen suite starts a virtual
+  X display, puts a window on it and captures it for real: the whole screen,
+  one display, one window, an exact rectangle, saved to disk and viewed back.
+  That is the test that matters, because the bugs live in the commands, not
+  around them. Without `Xvfb` the suite says so and skips that block, and what
+  remains still runs: the PNG codec, the token maths, the back-end decision
+  table, and — for Windows — the failure protocol, the explanation each failure
+  produces, and the temp path Node and .NET have to agree on.
 
 The plugin suite needs no accounts and no secrets: it stands up local mock
 servers that speak the real wire formats — including an actual UDP socket that
@@ -1106,16 +1161,18 @@ signposted rather than discovered.
 | **Windows** | Supported and tested — Git Bash, `cmd`, PowerShell 5, `pwsh` 7, WSL, `taskkill` process trees, CIM process listing, PowerShell disk queries |
 | **MCP protocol** | 2024-11-05, 2025-03-26, 2025-06-18 (negotiated per session) |
 | **Browser control** | Chrome, Chromium, Edge, Brave, Vivaldi — anything Chromium-family, on all three platforms. Not Firefox: it dropped most of its CDP surface in favour of WebDriver BiDi, which is a different protocol. |
-| **Desktop capture** | Windows: PowerShell + System.Drawing, nothing to install. macOS: `screencapture`, built in. Linux: whichever of `grim` (Wayland), `maim`, `import`, `scrot`, `spectacle`, `gnome-screenshot` is present — `--doctor` says which it found and what to install if none. |
+| **Desktop capture** | Windows: PowerShell + System.Drawing, nothing to install — but it must run in the interactive desktop session, and `screen { action: "probe" }` says whether it does. macOS: `screencapture`, built in. Linux: whichever of `grim` (Wayland), `maim`, `import`, `scrot`, `spectacle`, `gnome-screenshot` is present — `--doctor` says which it found and what to install if none. |
 | **Plugins** | Platform-independent: HTTPS and UDP. The FiveM client log that `f8` reads is Windows-only, because the FiveM client is. |
 
 The browser paths are tested on Linux against a real Chromium, and the Windows
 and macOS browser paths use the same protocol code — only the search for the
 binary differs per platform. Desktop capture is the one part where the
-per-platform commands differ substantially: the Linux back-end selection is
-covered by tests, the PowerShell and `screencapture` invocations are not yet
-exercised on a machine with a screen. If one misbehaves, please open an issue —
-`--doctor` output is the useful thing to paste.
+per-platform commands differ substantially: the Linux ones are now captured for
+real against a virtual X display, and the PowerShell script is parsed and its
+failure protocol exercised by an actual PowerShell — but a successful Windows
+capture, and every macOS capture, still depend on a machine we cannot run here.
+If one misbehaves, please open an issue: `screen { action: "probe" }` output is
+the useful thing to paste.
 
 ---
 

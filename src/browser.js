@@ -16,8 +16,8 @@
 // navigation exactly when they should be, and a stale ref says so rather than
 // clicking the wrong thing.
 
-import { mkdirSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync } from 'node:fs';
+import { rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { attachBrowser, launchBrowser, CdpConnection } from './cdp.js';
 import { truncateMiddle, ms } from './format.js';
@@ -256,6 +256,12 @@ export class BrowserManager {
     this.registering = new Map();
     this.activeId = null;
     this.startedAt = null;
+    // Downloads, keyed by the GUID Chromium gives each one. `downloadSeq` is
+    // what lets a caller wait for only the downloads its own click started.
+    this.downloads = new Map();
+    this.downloadSeq = 0;
+    this.downloadEvents = false;
+    this.downloadError = null;
   }
 
   get running() {
@@ -324,15 +330,7 @@ export class BrowserManager {
     });
     await this.settle();
 
-    // Downloads land somewhere the file tools can reach, instead of being
-    // cancelled or dropped into a temp profile nobody can find.
-    const downloadPath = this.downloadDir();
-    try {
-      mkdirSync(downloadPath, { recursive: true });
-      await this.conn.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath });
-    } catch {
-      /* not fatal: the browser may not allow it when attached */
-    }
+    await this.enableDownloads();
 
     await this.syncTargets();
     if (!this.pages.size) await this.newPage('about:blank');
@@ -341,6 +339,162 @@ export class BrowserManager {
 
   downloadDir() {
     return this.cfg.browser?.downloadDir ?? path.join(this.cfg.cwd, '.terminalmcp', 'downloads');
+  }
+
+  /**
+   * Make downloads land where the file tools can reach them — and, more to the
+   * point, make them observable.
+   *
+   * Setting a download path was never the missing piece — that was already
+   * here. What was missing is that nothing listened: the bytes went somewhere,
+   * but nothing said when a download started, when it finished, or what the
+   * file ended up being called, so the only way to find out was to guess a
+   * filename and poll the directory.
+   *
+   * `allowAndName` writes each file under its download GUID and leaves the
+   * naming to us. That is what makes the rest honest: two downloads of
+   * "data.zip" cannot overwrite each other, and a half-written file is never
+   * mistaken for a finished one, because the rename to the real name IS the
+   * completion signal.
+   */
+  async enableDownloads() {
+    const downloadPath = this.downloadDir();
+    try {
+      mkdirSync(downloadPath, { recursive: true });
+    } catch (err) {
+      this.downloadError = `${downloadPath} cannot be created: ${err.message}`;
+    }
+    this.conn.on('*/Browser.downloadWillBegin', (p) => this._downloadStarted(p));
+    this.conn.on('*/Browser.downloadProgress', (p) => this._downloadProgress(p));
+
+    try {
+      await this.conn.send('Browser.setDownloadBehavior', {
+        behavior: 'allowAndName',
+        downloadPath,
+        eventsEnabled: true,
+      });
+      this.downloadEvents = true;
+    } catch (err) {
+      // An older Chromium has no eventsEnabled, and a browser we merely
+      // attached to may refuse to have its download policy changed at all.
+      // Downloads can still work; we just cannot watch them, and saying so is
+      // better than reporting a download that finished when we cannot know.
+      this.downloadEvents = false;
+      this.downloadError = err.message;
+      try {
+        await this.conn.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath });
+      } catch {
+        /* leave the browser's own policy alone */
+      }
+    }
+  }
+
+  _downloadStarted({ guid, url, suggestedFilename }) {
+    if (!guid || this.downloads.has(guid)) return;
+    const entry = {
+      guid,
+      index: ++this.downloadSeq,
+      url: url ?? '',
+      name: suggestedFilename || 'download',
+      state: 'inProgress',
+      received: 0,
+      total: 0,
+      path: null,
+      error: null,
+      startedAt: Date.now(),
+      endedAt: null,
+    };
+    this.downloads.set(guid, entry);
+    // A long session must not accumulate history for ever; finished entries
+    // are the ones nobody is waiting on.
+    if (this.downloads.size > 200) {
+      for (const [g, d] of this.downloads) {
+        if (d.state !== 'inProgress') { this.downloads.delete(g); break; }
+      }
+    }
+  }
+
+  _downloadProgress({ guid, totalBytes, receivedBytes, state }) {
+    const d = this.downloads.get(guid);
+    if (!d || d.state !== 'inProgress') return;
+    if (totalBytes) d.total = totalBytes;
+    if (receivedBytes !== undefined) d.received = receivedBytes;
+    if (state === 'inProgress') return;
+
+    d.endedAt = Date.now();
+    if (state === 'canceled') {
+      d.state = 'canceled';
+      d.error = 'the browser cancelled it';
+      return;
+    }
+    // Completed. The file still has to be given its name, and that is async,
+    // so the entry stays 'inProgress' until the rename lands — otherwise a
+    // waiter could be told the download is done before the file exists.
+    d.finishing = this._finishDownload(d).catch((err) => {
+      d.state = 'failed';
+      d.error = err.message;
+    });
+  }
+
+  async _finishDownload(d) {
+    const dir = this.downloadDir();
+    const from = path.join(dir, d.guid);
+    const wanted = path.join(dir, safeDownloadName(d.name));
+
+    if (existsSync(from)) {
+      const to = await uniquePath(wanted);
+      await rename(from, to);
+      d.path = to;
+      d.name = path.basename(to);
+    } else if (existsSync(wanted)) {
+      // `allow` rather than `allowAndName`: Chromium already named it.
+      d.path = wanted;
+    } else {
+      d.state = 'failed';
+      d.error = `the browser reported it finished, but neither ${from} nor ${wanted} exists`;
+      return;
+    }
+
+    const st = await stat(d.path).catch(() => null);
+    if (st) {
+      d.received = st.size;
+      if (!d.total) d.total = st.size;
+    }
+    d.state = 'completed';
+  }
+
+  /** Downloads still running, oldest first. */
+  pendingDownloads() {
+    return [...this.downloads.values()].filter((d) => d.state === 'inProgress');
+  }
+
+  /** Every download this session knows about, oldest first. */
+  downloadList() {
+    return [...this.downloads.values()].sort((a, b) => a.index - b.index);
+  }
+
+  /**
+   * Wait for downloads to reach a terminal state.
+   *
+   * `since` is a download index: pass the value of `downloadSeq` from before
+   * the click or navigation, and only what that action started is waited on.
+   * Without it, a download already in flight from earlier would satisfy the
+   * wait and the caller would be handed the wrong file.
+   */
+  async waitForDownloads({ since = 0, timeoutMs = 120000, need = 1 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const mine = this.downloadList().filter((d) => d.index > since);
+      const settled = mine.filter((d) => d.state !== 'inProgress');
+      if (mine.length >= need && settled.length === mine.length) {
+        await Promise.allSettled(mine.map((d) => d.finishing).filter(Boolean));
+        return mine;
+      }
+      if (Date.now() >= deadline) {
+        return mine.length ? mine : null;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
   }
 
   /** Wait for every in-flight page registration to finish. */
@@ -1170,4 +1324,55 @@ export async function setCookie(page, cookie) {
 export async function clearCookies(page) {
   await page.send('Network.clearBrowserCookies');
   return true;
+}
+
+
+/**
+ * A filename safe to join onto the download directory.
+ *
+ * `suggestedFilename` comes from the server — a Content-Disposition header is
+ * attacker-controlled input, so a name like `../../.bashrc` has to stop here
+ * rather than at whatever writes the file.
+ */
+export function safeDownloadName(name) {
+  const base = path.basename(String(name ?? '').replace(/[\\/]+/g, '/'));
+  const cleaned = base
+    .replace(/[\u0000-\u001f<>:"|?*]/g, '_')
+    .replace(/^\.+/, '')
+    .trim();
+  return cleaned || 'download';
+}
+
+/** The given path, or the next free "name (2).ext" beside it. */
+export async function uniquePath(target) {
+  if (!existsSync(target)) return target;
+  const dir = path.dirname(target);
+  const ext = path.extname(target);
+  const stem = path.basename(target, ext);
+  for (let n = 2; n < 1000; n++) {
+    const candidate = path.join(dir, `${stem} (${n})${ext}`);
+    if (!existsSync(candidate)) return candidate;
+  }
+  return path.join(dir, `${stem} (${Date.now()})${ext}`);
+}
+
+/**
+ * Start a download by going to a URL.
+ *
+ * A URL whose response is a download aborts the navigation by design: Chromium
+ * hands the bytes to the download manager and the renderer never commits a
+ * document. So net::ERR_ABORTED is the expected outcome here, not a failure —
+ * which is exactly why `navigate` reports one and downloads looked blocked.
+ */
+export async function navigateForDownload(page, url, { timeoutMs = 30000 } = {}) {
+  const target = normalizeUrl(url);
+  try {
+    const res = await page.send('Page.navigate', { url: target }, { timeoutMs });
+    if (res.errorText && !/ERR_ABORTED/i.test(res.errorText)) {
+      throw new Error(`Could not open ${target}: ${res.errorText}`);
+    }
+  } catch (err) {
+    if (!/ERR_ABORTED/i.test(err.message)) throw err;
+  }
+  return target;
 }

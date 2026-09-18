@@ -5,14 +5,23 @@
 // failure) always runs, and the actual capture runs only when there is a
 // graphical session to capture.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
 import { encodePng, pngInfo } from '../src/image.js';
-import { sessionType } from '../src/screen.js';
+import { describeRunFailure, runFailed } from '../src/exec.js';
+import {
+  WINDOWS_SCRIPT,
+  explainWindowsFailure,
+  findWindowsError,
+  parseWindowsOk,
+  sessionType,
+  shotTempDir,
+} from '../src/screen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = join(ROOT, 'bin', 'terminalmcp.js');
@@ -25,13 +34,13 @@ function check(name, cond, detail = '') {
 }
 
 class Client {
-  constructor(cwd, extraArgs = []) {
+  constructor(cwd, extraArgs = [], extraEnv = {}) {
     this.id = 0;
     this.pending = new Map();
     this.buf = '';
     this.proc = spawn(process.execPath, [ENTRY, '--cwd', cwd, ...extraArgs], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, TERMINALMCP_CONFIG: join(cwd, 'no-such-config.json') },
+      env: { ...process.env, TERMINALMCP_CONFIG: join(cwd, 'no-such-config.json'), ...extraEnv },
     });
     this.proc.stdout.setEncoding('utf8');
     this.proc.stdout.on('data', (d) => this._onData(d));
@@ -92,6 +101,38 @@ function fixtureImage(w, h) {
     }
   }
   return encodePng({ width: w, height: h, rgba });
+}
+
+function onPathSync(name) {
+  return (process.env.PATH || '').split(':').some((d) => d && existsSync(join(d, name)));
+}
+
+/**
+ * A throwaway X display, so the capture commands themselves can be exercised
+ * rather than only the logic around them. Returns null when the machine has no
+ * Xvfb — a missing tool is a missing tool, not a failing test.
+ */
+async function startXvfb() {
+  if (process.platform !== 'linux' || !onPathSync('Xvfb') || !onPathSync('xdpyinfo')) return null;
+  for (let n = 90; n <= 99; n++) {
+    const display = `:${n}`;
+    // Xvfb refuses to start on a display whose lock file exists, even a stale
+    // one left behind by a server that was killed rather than asked to stop.
+    if (existsSync(`/tmp/.X${n}-lock`) || existsSync(`/tmp/.X11-unix/X${n}`)) continue;
+    const proc = spawn('Xvfb', [display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], {
+      stdio: 'ignore',
+      detached: true,
+    });
+    proc.unref();
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      const probe = spawnSync('xdpyinfo', [], { env: { ...process.env, DISPLAY: display }, stdio: 'ignore' });
+      if (probe.status === 0) return { display, proc, width: 1280, height: 800 };
+      if (proc.exitCode !== null) break;
+    }
+    try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+  }
+  return null;
 }
 
 async function main() {
@@ -178,6 +219,140 @@ async function main() {
       check('a missing action is reported', r.isError && /needs "action"/.test(r.text), r.text);
     }
 
+    console.log('\n--- probe: the tool that says whether capture can work here ---');
+    {
+      const r = await c.call('screen', { action: 'probe' });
+      check('probe answers instead of failing', !r.isError, r.text);
+      check('probe names the session type', /session type:/.test(r.text), r.text);
+      if (session) {
+        check(
+          'probe ends in a verdict either way',
+          /Screenshots work on this machine\.|FAILED/.test(r.text),
+          r.text,
+        );
+      } else {
+        check('probe on a headless box points at the browser tool', /browser tool/.test(r.text), r.text);
+      }
+    }
+
+    if (process.platform === 'linux') {
+      console.log('\n--- probe on a Linux session, with no capture tool to be found ---');
+      // DISPLAY is enough to make the server believe there is an X11 session,
+      // which is what exercises the back-end selection inside probe on CI.
+      const x11 = await new Client(dir, ['--tools', 'core,screen'], { DISPLAY: ':99', WAYLAND_DISPLAY: '' }).init();
+      try {
+        const r = await x11.call('screen', { action: 'probe' });
+        check('probe reports the session it believes it is in', /session type: x11/.test(r.text), r.text);
+        check('probe lists the capture tools it found', /capture tools installed:/.test(r.text), r.text);
+        check('probe names the temp dir a capture goes through', /temp dir for captures:/.test(r.text), r.text);
+        check('probe still tries the real thing end to end', /end-to-end capture:/.test(r.text), r.text);
+        if (!/capture tools installed: (grim|maim|import|scrot|spectacle|gnome-screenshot|xfce4-screenshooter)/.test(r.text)) {
+          check('with nothing installed, probe says what to install', /install one of:/.test(r.text), r.text);
+        }
+        check('probe answers rather than erroring, even when capture cannot work', !r.isError, r.text);
+      } finally {
+        x11.close();
+      }
+    }
+
+    console.log('\n--- the Windows script reports failures the caller can act on ---');
+    {
+      // Here-strings only close on a terminator at column 0. Indent it while
+      // tidying the script and PowerShell swallows the rest of the file.
+      const badTerminator = WINDOWS_SCRIPT.split('\n').filter((l) => l.trim() === "'@" && l !== "'@");
+      check('every here-string terminator is at column 0', badTerminator.length === 0, JSON.stringify(badTerminator));
+
+      check('the output path parameter is spelled out', /\[string\]\$OutFile/.test(WINDOWS_SCRIPT));
+      check(
+        'no parameter is short enough to be ambiguous',
+        !/\[(string|int)\]\$(Out|W|H|X|Y|D|T)\b/.test(WINDOWS_SCRIPT),
+        (WINDOWS_SCRIPT.match(/\[(string|int)\]\$\w+/g) || []).join(' '),
+      );
+      check('the script has a probe mode', /'probe' \{/.test(WINDOWS_SCRIPT));
+      check('capture failures are caught around CopyFromScreen', /Fail 'copyfromscreen'/.test(WINDOWS_SCRIPT));
+
+      const stages = [...new Set([...WINDOWS_SCRIPT.matchAll(/Fail '([a-z]+)'/g)].map((m) => m[1]))];
+      check('the script reports several distinct failure stages', stages.length >= 7, stages.join(','));
+      const unexplained = stages.filter((stage) =>
+        /failed at stage/.test(explainWindowsFailure({ stage, type: 'Some.Type', message: 'something' })),
+      );
+      check('every stage the script can report has an explanation', unexplained.length === 0, unexplained.join(','));
+    }
+
+    console.log('\n--- reading that report back ---');
+    {
+      check('normal output carries no error', findWindowsError('OK\t0\t0\t8\t8\tC:\\Temp\\a.png\t120') === null);
+      check('a probe listing carries no error', findWindowsError('station\tWinSta0\ncopyfromscreen\tok') === null);
+
+      const err = findWindowsError(
+        'something noisy first\nERR\tcopyfromscreen\tSystem.ComponentModel.Win32Exception\t0x80004005\tThe handle is invalid',
+      );
+      check('the ERR line is found among other output', err !== null && err.stage === 'copyfromscreen', JSON.stringify(err));
+      check('the exception type is kept', err?.type === 'System.ComponentModel.Win32Exception', JSON.stringify(err));
+      check('the hresult is kept', err?.hresult === '0x80004005', JSON.stringify(err));
+      check('the message is kept', err?.message === 'The handle is invalid', JSON.stringify(err));
+
+      const denied = explainWindowsFailure(err);
+      check('an invalid handle is explained as the desktop, not as a bug', /interactive desktop/.test(denied), denied);
+      check('...naming the causes that produce it', /service|session 0|SSH/.test(denied), denied);
+      check('...telling the reader to run probe', /action: "probe"/.test(denied), denied);
+      check('...and offering the browser as the way out', /browser tool/.test(denied), denied);
+      check('...while still quoting what Windows said', /The handle is invalid/.test(denied), denied);
+
+      const odd = explainWindowsFailure({
+        stage: 'copyfromscreen',
+        type: 'System.OutOfMemoryException',
+        message: 'Out of memory',
+      });
+      check('an unrelated capture failure does not claim the desktop story', !/interactive desktop/.test(odd), odd);
+      check('...but still points at probe', /probe/.test(odd), odd);
+
+      const save = explainWindowsFailure({
+        stage: 'save',
+        type: 'System.Runtime.InteropServices.ExternalException',
+        message: 'A generic error occurred in GDI+.',
+      });
+      check('a failed save blames the destination, not the capture', /could not be written/.test(save), save);
+      check('...and names the thing to check', /TEMP/.test(save), save);
+
+      const assemblies = explainWindowsFailure({ stage: 'assemblies', type: 'System.IO.FileNotFoundException', message: 'System.Drawing' });
+      check('a missing assembly points at Windows PowerShell 5.1', /powershell\.exe/.test(assemblies), assemblies);
+
+      const min = explainWindowsFailure({ stage: 'minimized', message: "the window 'Git Bash' is minimized" });
+      check('a minimized window suggests activate', /activate: true/.test(min), min);
+
+      check('an unknown stage still says something', explainWindowsFailure({ stage: 'zzz' }).length > 20);
+    }
+
+    console.log('\n--- and reading a successful capture back ---');
+    {
+      const ok = parseWindowsOk('OK\t-1920\t0\t3840\t1080\tC:\\Users\\me\\AppData\\Local\\Temp\\a b.png\t482910');
+      check('the geometry is read back', ok?.width === 3840 && ok?.height === 1080 && ok?.x === -1920, JSON.stringify(ok));
+      check('the path the script resolved is read back, spaces and all', ok?.path === 'C:\\Users\\me\\AppData\\Local\\Temp\\a b.png', JSON.stringify(ok));
+      check('so is the size it wrote', ok?.bytes === 482910, JSON.stringify(ok));
+      check('an ERR line is not mistaken for success', parseWindowsOk('ERR\tsave\tX\t\tno') === null);
+      check('empty output is not mistaken for success', parseWindowsOk('') === null);
+    }
+
+    console.log('\n--- the capture temp dir is one .NET and Node agree on ---');
+    {
+      const win = (tmp, env = {}) => shotTempDir({ tmp, env, platform: 'win32' });
+      check('a drive-qualified TEMP is used as it is', win('C:\\Users\\me\\AppData\\Local\\Temp') === 'C:\\Users\\me\\AppData\\Local\\Temp');
+      check('a UNC TEMP is used as it is', win('\\\\nas\\share\\tmp') === '\\\\nas\\share\\tmp');
+      check(
+        'Git Bash\u2019s /tmp is replaced with LOCALAPPDATA',
+        win('/tmp', { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }) === 'C:\\Users\\me\\AppData\\Local\\Temp',
+        win('/tmp', { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }),
+      );
+      check(
+        '...or the profile, when LOCALAPPDATA is not set',
+        win('/tmp', { USERPROFILE: 'D:\\Users\\me' }) === 'D:\\Users\\me\\AppData\\Local\\Temp',
+        win('/tmp', { USERPROFILE: 'D:\\Users\\me' }),
+      );
+      check('...or the Windows directory as a last resort', /Temp$/.test(win('/tmp', {})), win('/tmp', {}));
+      check('other platforms are left alone', shotTempDir({ tmp: '/tmp', env: {}, platform: 'linux' }) === '/tmp');
+    }
+
     console.log('\n--- allowedRoots applies to images too ---');
     {
       const jailed = await new Client(dir, ['--tools', 'core,screen', '--allowed-root', dir]).init();
@@ -193,6 +368,100 @@ async function main() {
       } finally {
         jailed.close();
       }
+    }
+
+    console.log('\n--- against a real X display: the capture commands themselves ---');
+    {
+      const x = await startXvfb();
+      if (!x) {
+        console.log('  (skipped: no Xvfb on this machine)');
+      } else {
+        const env = { DISPLAY: x.display, WAYLAND_DISPLAY: '' };
+        const shots = join(dir, 'xvfb-shots');
+        const c2 = await new Client(dir, ['--tools', 'core,screen', '--shots-dir', shots], env).init();
+        // A window to aim at, if the machine has one to give.
+        const win = onPathSync('xmessage')
+          ? spawn('xmessage', ['-geometry', '400x200+100+80', 'TerminalMCP capture test'], {
+              env: { ...process.env, DISPLAY: x.display },
+              stdio: 'ignore',
+              detached: true,
+            })
+          : null;
+        if (win) await new Promise((r) => setTimeout(r, 1200));
+        try {
+          let r = await c2.call('screen', { action: 'displays' });
+          check('displays succeeds against a real display', !r.isError, r.text);
+          check('...and reports its size', /1280x800/.test(r.text), r.text);
+
+          r = await c2.call('screen', { action: 'shot', save: false });
+          check('a whole-screen shot succeeds', !r.isError, r.text.slice(0, 300));
+          check('...and comes back as an image, not a description', r.images?.length === 1, r.text);
+          check('...of the whole screen', /1280x800/.test(r.text), r.text);
+
+          r = await c2.call('screen', { action: 'shot', mode: 'region', x: 10, y: 10, width: 200, height: 120, save: false });
+          check('a region shot succeeds', !r.isError, r.text.slice(0, 300));
+          const region = r.images?.[0] ? pngInfo(Buffer.from(r.images[0].data, 'base64')) : null;
+          check('...and is exactly the rectangle asked for', region?.width === 200 && region?.height === 120, JSON.stringify(region));
+
+          r = await c2.call('screen', { action: 'shot', mode: 'display', display: '1', save: false });
+          check('capturing one display succeeds', !r.isError, r.text.slice(0, 300));
+
+          r = await c2.call('screen', { action: 'shot', mode: 'region', x: 0, y: 0, width: 64, height: 48 });
+          check('a shot saves where the config says', !r.isError && r.text.includes(shots), r.text);
+          const savedPath = (r.text.match(/saved (\S+\.png)/) || [])[1];
+          check('...and the file is really there', savedPath ? (await stat(savedPath).catch(() => null))?.size > 0 : false, String(savedPath));
+          const onDisk = savedPath ? pngInfo(await readFile(savedPath)) : null;
+          check('...at full resolution, not the scaled copy', onDisk?.width === 64 && onDisk?.height === 48, JSON.stringify(onDisk));
+
+          r = await c2.call('screen', { action: 'view', path: savedPath });
+          check('and the saved capture can be viewed back', !r.isError && r.images?.length === 1, r.text);
+
+          r = await c2.call('screen', { action: 'probe' });
+          check('probe confirms capture works here', /8x8 end-to-end capture: ok/.test(r.text), r.text);
+
+          if (win) {
+            r = await c2.call('screen', { action: 'windows' });
+            check('a window on a bare X session is still found', /xmessage/.test(r.text), r.text);
+
+            r = await c2.call('screen', { action: 'shot', mode: 'window', window: 'xmessage', save: false });
+            check('capturing that window succeeds', !r.isError, r.text.slice(0, 300));
+            const shot = r.images?.[0] ? pngInfo(Buffer.from(r.images[0].data, 'base64')) : null;
+            check('...and is the size of the window', shot?.width === 400 && shot?.height === 200, JSON.stringify(shot));
+          }
+
+          check('nothing crashed the server', !/handler crash|uncaught/.test(c2.stderr), c2.stderr.slice(-300));
+        } finally {
+          c2.close();
+          if (win) { try { process.kill(-win.pid, 'SIGKILL'); } catch { try { win.kill('SIGKILL'); } catch { /* gone */ } } }
+          // SIGTERM, not SIGKILL: Xvfb removes its own lock file on a clean
+          // exit, and a stale lock makes the next run skip this display.
+          try { x.proc.kill('SIGTERM'); } catch { /* gone */ }
+        }
+      }
+    }
+
+    console.log('\n--- a run is judged by exitCode, which is the property that exists ---');
+    {
+      // This is the shape that broke every capture path: `r.code` is undefined
+      // on a run, so `r.code !== 0` was always true and every success was
+      // reported as a failure carrying the output it should have returned.
+      const cfg = { cwd: process.cwd(), env: {}, timeoutMs: 10000, maxBufferBytes: 1 << 20, allowedRoots: [] };
+      const { runArgv } = await import('../src/exec.js');
+
+      const ok = await runArgv(cfg, { file: process.execPath, args: ['-e', 'console.log("out")'] });
+      check('a run carries exitCode', ok.exitCode === 0, JSON.stringify(Object.keys(ok).slice(0, 20)));
+      check('a run has no "code" to read by mistake', ok.code === undefined);
+      check('a successful run is not a failure', runFailed(ok) === false);
+
+      const bad = await runArgv(cfg, { file: process.execPath, args: ['-e', 'console.error("boom"); process.exit(3)'] });
+      check('a non-zero exit is a failure', runFailed(bad) === true);
+      const why = describeRunFailure(bad, 'node');
+      check('...and says which code it exited with', /exited with code 3/.test(why), why);
+      check('...with stderr labelled, not pasted in raw', /stderr: boom/.test(why), why);
+
+      const missing = await runArgv(cfg, { file: 'definitely-not-a-real-program-xyz', args: [] });
+      check('a program that does not exist is a failure', runFailed(missing) === true);
+      check('...and says so', /could not be started|not found/.test(describeRunFailure(missing)), describeRunFailure(missing));
     }
 
     if (!session) {

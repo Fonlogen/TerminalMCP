@@ -242,7 +242,10 @@ function describeBrowser(cfg) {
 function describeScreen() {
   const session = sessionType();
   if (!session) return 'no graphical session (DISPLAY/WAYLAND_DISPLAY unset) — desktop capture unavailable, browser screenshots still work';
-  if (session === 'windows') return 'windows — PowerShell + System.Drawing';
+  if (session === 'windows') {
+    return 'windows — PowerShell + System.Drawing (if a shot fails, run screen { action: "probe" }: '
+      + 'capture needs the interactive desktop, which a service or an SSH login does not have)';
+  }
   if (session === 'quartz') return 'macOS — screencapture (needs Screen Recording permission)';
   const found = LINUX_CAPTURERS.filter((c) => onPathSync(c.name)).map((c) => c.name);
   return found.length

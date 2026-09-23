@@ -76,7 +76,7 @@ Options:
   --persist-secrets      also write variables marked secret to that file
   --max-vars <n>         how many variables may be stored (default 200)
   --max-var-bytes <n>    size cap per variable (default 1048576)
-  --plugin <name|path>   enable an optional plugin (repeatable): fivem, discord, telegram,
+  --plugin <name|path>   enable an optional plugin (repeatable): fivem, discord, telegram, laya,
                          or a path to your own .js. Off by default — plugin schemas
                          cost tokens too. Credentials go in the config file or env vars.
   --browser-path <file>  Chromium-family binary for the browser tool (else auto-detected)

@@ -578,7 +578,7 @@ move and says which of the two it is.
 
 ## Optional integrations
 
-Some setups also expose `fivem`, `discord` or `telegram`. They are off by
+Some setups also expose `fivem`, `discord`, `telegram` or `laya`. They are off by
 default, so do not assume they exist — if one is in your tool list, it is
 enabled and configured, and each has its own skill with the detail.
 

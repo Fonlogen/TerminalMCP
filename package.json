@@ -1,7 +1,7 @@
 {
   "name": "terminalmcp",
   "version": "0.1.0",
-  "description": "Zero-dependency MCP server giving an AI agent full control of a machine: shell, filesystem, git, package managers, processes, network, a real browser, and the screen \u2014 designed to spend as few tokens as possible.",
+  "description": "Zero-dependency MCP server giving an AI agent full control of a machine: shell, filesystem, git, package managers, processes, network, a real browser, and the screen — designed to spend as few tokens as possible.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -35,7 +35,9 @@
     "rcon",
     "txadmin",
     "chatops",
-    "plugins"
+    "plugins",
+    "laya",
+    "playtest"
   ],
   "homepage": "https://github.com/Fonlogen/TerminalMCP#readme",
   "repository": {
@@ -56,7 +58,7 @@
   },
   "scripts": {
     "start": "node bin/terminalmcp.js",
-    "test": "node test/smoke.mjs && node test/guards.mjs && node test/tools.mjs && node test/vars.mjs && node test/image.mjs && node test/screen.mjs && node test/input.mjs && node test/plugins.mjs && node test/browser.mjs && node test/http.mjs",
+    "test": "node test/smoke.mjs && node test/guards.mjs && node test/tools.mjs && node test/vars.mjs && node test/image.mjs && node test/screen.mjs && node test/input.mjs && node test/plugins.mjs && node test/laya.mjs && node test/browser.mjs && node test/http.mjs",
     "print-config": "node bin/terminalmcp.js --print-config",
     "test:smoke": "node test/smoke.mjs",
     "test:guards": "node test/guards.mjs",
@@ -71,7 +73,8 @@
     "test:screen": "node test/screen.mjs",
     "test:input": "node test/input.mjs",
     "test:browser": "node test/browser.mjs",
-    "test:plugins": "node test/plugins.mjs"
+    "test:plugins": "node test/plugins.mjs",
+    "test:laya": "node test/laya.mjs"
   },
   "files": [
     "bin",

@@ -458,7 +458,7 @@ async function main() {
       const names = await badClient.tools();
       check('the server still starts', names.includes('shell_exec'), names.join(','));
       check('a module that is not a plugin is reported', /must export TOOLS and createHandlers/.test(badClient.stderr), badClient.stderr.slice(0, 300));
-      check('an unknown name lists the built-in ones', /Built in: fivem, discord, telegram/.test(badClient.stderr), badClient.stderr.slice(0, 300));
+      check('an unknown name lists the built-in ones', /Built in: fivem, discord, telegram, laya/.test(badClient.stderr), badClient.stderr.slice(0, 300));
       badClient.close();
     }
 

@@ -52,6 +52,7 @@ export const TOOLS = [
         y: { type: 'integer', description: 'Target y.' },
         dx: { type: 'integer', description: 'move: offset from the current position instead of an absolute x.' },
         dy: { type: 'integer', description: 'move: vertical offset.' },
+        raw: { type: 'boolean', description: 'move with dx/dy: send raw mouse motion, as a physical mouse does. Needed to turn the camera in games that capture the pointer (Minecraft, FPS).' },
         to_x: { type: 'integer', description: 'drag: where the drag ends.' },
         to_y: { type: 'integer', description: 'drag: where the drag ends.' },
         button: { type: 'string', enum: ['left', 'middle', 'right'], description: 'click/drag: which button. Default left.' },
@@ -100,6 +101,7 @@ export const TOOLS = [
               y: { type: ['integer', 'string'], description: 'Target y (or shot region top).' },
               dx: { type: ['integer', 'string'] },
               dy: { type: ['integer', 'string'] },
+              raw: { type: 'boolean', description: 'move: raw relative motion, for turning a game camera.' },
               to_x: { type: ['integer', 'string'], description: 'drag: end x.' },
               to_y: { type: ['integer', 'string'], description: 'drag: end y.' },
               button: { type: 'string', enum: ['left', 'middle', 'right'] },
@@ -233,9 +235,10 @@ export function createHandlers({ cfg, vars = null }) {
             y: relative ? null : a.y,
             dx: a.dx ?? 0,
             dy: a.dy ?? 0,
+            raw: Boolean(a.raw),
             timeoutMs,
           });
-          lines.push(p.x === null ? 'moved the pointer' : `pointer now at ${p.x},${p.y}`);
+          lines.push(p.raw ? `raw motion ${a.dx ?? 0},${a.dy ?? 0}` : p.x === null ? 'moved the pointer' : `pointer now at ${p.x},${p.y}`);
           break;
         }
 

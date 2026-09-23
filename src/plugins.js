@@ -28,7 +28,7 @@ import { PolicyError } from './guards.js';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Plugins that ship with the server. */
-export const BUILTIN_PLUGINS = ['fivem', 'discord', 'telegram'];
+export const BUILTIN_PLUGINS = ['fivem', 'discord', 'telegram', 'laya'];
 
 /**
  * Read a config value that may name an environment variable instead of

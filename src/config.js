@@ -99,7 +99,7 @@ export const DEFAULTS = {
   },
 
   // --- Optional plugins: integrations that are off unless asked for. ---
-  // Names of built-in plugins (fivem, discord, telegram), or paths to your
+  // Names of built-in plugins (fivem, discord, telegram, laya), or paths to your
   // own .js files. A plugin is never part of "all": naming it here is what
   // enables it, because its tool schemas cost tokens on every request and
   // most sessions do not need them.

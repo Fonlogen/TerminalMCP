@@ -116,7 +116,7 @@ export class Server {
               'of many shell_exec calls; locate code with search_text instead of reading whole ' +
               'files; patch files with file_edit; call project_info once to orient in an ' +
               'unfamiliar repo; read a web page with browser snapshot rather than its HTML. ' +
-              'Some setups also expose optional integrations (fivem, discord, telegram) — use ' +
+              'Some setups also expose optional integrations (fivem, discord, telegram, laya) — use ' +
               'their wait/updates actions to block for a reply instead of polling.',
           });
         }

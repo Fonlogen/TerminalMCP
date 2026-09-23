@@ -91,7 +91,7 @@
   "tools": "all",
 
   // ---- Optional plugins. Off unless named here. ----
-  // Built in: "fivem", "discord", "telegram". Or a path to your own .js file
+  // Built in: "fivem", "discord", "telegram", "laya". Or a path to your own .js file
   // exporting TOOLS + createHandlers, the same shape as src/tools/*.js.
   // A plugin is never part of "all": its schemas cost tokens on every request
   // and most sessions do not need them.
@@ -152,6 +152,23 @@
       "defaultChat": null,
       // If non-empty, only these chat ids may be touched.
       "allowedChats": []
+    },
+    "laya": {
+      // The Python that has `pip install laya`. null = .venv or venv in the
+      // server cwd, else python on PATH. For an NVIDIA GPU install the CUDA
+      // build of torch in that venv before laya.
+      "python": null,
+      // Checkpoints loaded when the worker starts: "english" (default),
+      // "all", a list like ["english", "multilingual"], or false for lazy.
+      // Each is ~1-1.7 GB, downloaded from Hugging Face on first use.
+      "preload": "english",
+      // "cuda", "cpu", "mps"; null lets torch choose.
+      "device": null,
+      // CPU inference: cap torch threads at or below the physical cores.
+      "threads": null,
+      // Use a running `laya-serve` instead of a local worker.
+      "url": null,
+      "apiKey": "env:LAYA_API_KEY"
     }
   },
 

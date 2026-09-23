@@ -21,6 +21,7 @@
 // "which VK is F13" is exactly the kind of thing that is wrong once and then
 // wrong for ever.
 
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -297,9 +298,17 @@ export const WINDOWS_INPUT_SCRIPT = `param(
   [int]$HoldMs = 0,
   [int]$IntervalMs = 0,
   [int]$Steps = 12,
-  [string]$Title = ''
+  [string]$Title = '',
+  [int]$Raw = 0,
+  [int]$FrameW = 32,
+  [int]$FrameH = 18
 )
 $ErrorActionPreference = 'Stop'
+$script:Serving = $false
+
+# Straight to stdout and flushed: in serve mode the reply must arrive now, not
+# when some pipeline buffer fills.
+function Emit($line) { [Console]::Out.WriteLine($line); [Console]::Out.Flush() }
 
 function Fail($stage, $err) {
   $ex = $err
@@ -313,7 +322,8 @@ function Fail($stage, $err) {
     try { $hr = '0x' + ($ex.HResult).ToString('X8') } catch { $hr = '' }
   }
   $msg = $msg.Replace("\`r", ' ').Replace("\`n", ' ').Replace("\`t", ' ').Trim()
-  Write-Output ("ERR\`t" + $stage + "\`t" + $type + "\`t" + $hr + "\`t" + $msg)
+  Emit ("ERR\`t" + $stage + "\`t" + $type + "\`t" + $hr + "\`t" + $msg)
+  if ($script:Serving) { throw 'TMCP_FAILED' }
   exit 2
 }
 
@@ -339,6 +349,9 @@ public class TMcpInput {
   [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint mapType);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern short VkKeyScan(char ch);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
@@ -388,6 +401,18 @@ public class TMcpInput {
   public static POINT Where() { POINT p; GetCursorPos(out p); return p; }
 
   public static void MoveTo(int x, int y) { Send(new INPUT[] { MouseAt(x, y, 0, 0) }); }
+
+  // Relative motion as a mouse reports it. A game that captures the pointer
+  // (Minecraft, any FPS) reads these raw deltas to turn the camera and never
+  // looks at where the cursor is, so an absolute move does nothing there.
+  public static void Nudge(int dx, int dy) {
+    var i = new INPUT();
+    i.type = INPUT_MOUSE;
+    i.u.mi.dx = dx;
+    i.u.mi.dy = dy;
+    i.u.mi.dwFlags = MOVE;
+    Send(new INPUT[] { i });
+  }
 
   static uint DownFlag(int button) { return button == 3 ? 0x0008u : button == 2 ? 0x0020u : 0x0002u; }
   static uint UpFlag(int button)   { return button == 3 ? 0x0010u : button == 2 ? 0x0040u : 0x0004u; }
@@ -500,13 +525,18 @@ function PressChord($chord, $holdMs) {
   foreach ($m in $downs) { [TMcpInput]::KeyStroke($m, $false, $true) }
 }
 
-try {
-  switch ($Mode) {
+function Dispatch {
+  switch ($script:Mode) {
     'position' {
       $p = [TMcpInput]::Where()
-      Write-Output ("OK\`t" + $p.X + "\`t" + $p.Y)
+      Emit ("OK\`t" + $p.X + "\`t" + $p.Y)
     }
     'move' {
+      if ($Raw -ne 0) {
+        [TMcpInput]::Nudge($DeltaX, $DeltaY)
+        Emit ("OK\`traw\`t" + $DeltaX + "\`t" + $DeltaY)
+        return
+      }
       if ($X -eq -2147483648) {
         $p = [TMcpInput]::Where()
         [TMcpInput]::MoveTo($p.X + $DeltaX, $p.Y + $DeltaY)
@@ -514,13 +544,13 @@ try {
         [TMcpInput]::MoveTo($X, $Y)
       }
       $p = [TMcpInput]::Where()
-      Write-Output ("OK\`t" + $p.X + "\`t" + $p.Y)
+      Emit ("OK\`t" + $p.X + "\`t" + $p.Y)
     }
     'click' {
       if ($X -ne -2147483648) { [TMcpInput]::MoveTo($X, $Y); Start-Sleep -Milliseconds 20 }
       [TMcpInput]::Click($Button, $Count)
       $p = [TMcpInput]::Where()
-      Write-Output ("OK\`t" + $p.X + "\`t" + $p.Y)
+      Emit ("OK\`t" + $p.X + "\`t" + $p.Y)
     }
     'drag' {
       if ($X -ne -2147483648) { [TMcpInput]::MoveTo($X, $Y); Start-Sleep -Milliseconds 30 }
@@ -539,17 +569,17 @@ try {
       Start-Sleep -Milliseconds 40
       [TMcpInput]::Up($Button)
       $p = [TMcpInput]::Where()
-      Write-Output ("OK\`t" + $p.X + "\`t" + $p.Y)
+      Emit ("OK\`t" + $p.X + "\`t" + $p.Y)
     }
     'scroll' {
       if ($X -ne -2147483648) { [TMcpInput]::MoveTo($X, $Y); Start-Sleep -Milliseconds 20 }
       [TMcpInput]::Wheel($Amount, ($Horizontal -ne 0))
       $p = [TMcpInput]::Where()
-      Write-Output ("OK\`t" + $p.X + "\`t" + $p.Y)
+      Emit ("OK\`t" + $p.X + "\`t" + $p.Y)
     }
     'type' {
       [TMcpInput]::TypeUnicode($Text, $IntervalMs)
-      Write-Output ("OK\`t" + $Text.Length)
+      Emit ("OK\`t" + $Text.Length)
     }
     'keys' {
       $list = @()
@@ -558,20 +588,55 @@ try {
         PressChord $c $HoldMs
         if ($IntervalMs -gt 0) { Start-Sleep -Milliseconds $IntervalMs }
       }
-      Write-Output ("OK\`t" + $list.Count)
+      Emit ("OK\`t" + $list.Count)
     }
     'focus' {
       $h = [TMcpInput]::Find($Title)
       if ($h -eq [IntPtr]::Zero) { Fail 'window' "no visible window has '$Title' in its title" }
       [TMcpInput]::Raise($h) | Out-Null
       Start-Sleep -Milliseconds 250
-      Write-Output ("OK\`t" + [TMcpInput]::Foreground())
+      Emit ("OK\`t" + [TMcpInput]::Foreground())
+    }
+    'frame' {
+      # A tiny grey thumbnail of a window (or the whole virtual screen), as hex:
+      # enough to tell whether the picture moved, froze or went black, cheaply
+      # enough to run on every playtest tick.
+      Add-Type -AssemblyName System.Drawing
+      $rx = [TMcpInput]::GetSystemMetrics(76); $ry = [TMcpInput]::GetSystemMetrics(77)
+      $rw = [TMcpInput]::GetSystemMetrics(78); $rh = [TMcpInput]::GetSystemMetrics(79)
+      if ($Title -ne '') {
+        $h = [TMcpInput]::Find($Title)
+        if ($h -eq [IntPtr]::Zero) { Emit ("OK\`tnowindow"); return }
+        $r = New-Object TMcpInput+RECT
+        [TMcpInput]::GetWindowRect($h, [ref]$r) | Out-Null
+        $rx = $r.Left; $ry = $r.Top; $rw = $r.Right - $r.Left; $rh = $r.Bottom - $r.Top
+        if ($rw -lt 2 -or $rh -lt 2) { Emit ("OK\`tminimized"); return }
+      }
+      $bmp = New-Object System.Drawing.Bitmap $rw, $rh
+      $g = [System.Drawing.Graphics]::FromImage($bmp)
+      $g.CopyFromScreen($rx, $ry, 0, 0, $bmp.Size)
+      $g.Dispose()
+      $small = New-Object System.Drawing.Bitmap $FrameW, $FrameH
+      $g2 = [System.Drawing.Graphics]::FromImage($small)
+      $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBilinear
+      $g2.DrawImage($bmp, 0, 0, $FrameW, $FrameH)
+      $g2.Dispose(); $bmp.Dispose()
+      $sb = New-Object System.Text.StringBuilder
+      for ($j = 0; $j -lt $FrameH; $j++) {
+        for ($i = 0; $i -lt $FrameW; $i++) {
+          $c = $small.GetPixel($i, $j)
+          $v = [int](($c.R * 299 + $c.G * 587 + $c.B * 114) / 1000)
+          [void]$sb.Append($v.ToString('x2'))
+        }
+      }
+      $small.Dispose()
+      Emit ("OK\`t" + $FrameW + "\`t" + $FrameH + "\`t" + $sb.ToString() + "\`t" + [TMcpInput]::Foreground())
     }
     'probe' {
       $p = [TMcpInput]::Where()
-      Write-Output ("pointer\`t" + $p.X + "\`t" + $p.Y)
-      Write-Output ("foreground\`t" + [TMcpInput]::Foreground())
-      Write-Output ("virtualscreen\`t" + [TMcpInput]::GetSystemMetrics(78) + "x" + [TMcpInput]::GetSystemMetrics(79))
+      Emit ("pointer\`t" + $p.X + "\`t" + $p.Y)
+      Emit ("foreground\`t" + [TMcpInput]::Foreground())
+      Emit ("virtualscreen\`t" + [TMcpInput]::GetSystemMetrics(78) + "x" + [TMcpInput]::GetSystemMetrics(79))
       # Move the pointer one pixel and back: the smallest injected event there
       # is, and the only way to know SendInput is allowed at all.
       try {
@@ -579,14 +644,43 @@ try {
         Start-Sleep -Milliseconds 30
         $after = [TMcpInput]::Where()
         [TMcpInput]::MoveTo($p.X, $p.Y)
-        Write-Output ("sendinput\`t" + $(if ($after.X -ne $p.X) { "ok" } else { "accepted but the pointer did not move" }))
+        Emit ("sendinput\`t" + $(if ($after.X -ne $p.X) { "ok" } else { "accepted but the pointer did not move" }))
       } catch {
-        Write-Output ("sendinput\`tfailed\`t" + $_.Exception.GetType().FullName + "\`t" + $_.Exception.Message)
+        Emit ("sendinput\`tfailed\`t" + $_.Exception.GetType().FullName + "\`t" + $_.Exception.Message)
       }
     }
     default { Fail 'args' "unknown mode '$Mode'" }
   }
-} catch { Fail 'unexpected' $_ }
+}
+
+# serve: stay resident, one JSON request per line, each answered and closed
+# with END. The C# above is compiled once instead of on every keystroke, which
+# is the difference between ~600 ms and a few ms per action.
+if ($Mode -eq 'serve') {
+  $script:Serving = $true
+  try { [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+  $defaults = @{ Mode = 'probe'; X = -2147483648; Y = -2147483648; DeltaX = 0; DeltaY = 0; ToX = -2147483648; ToY = -2147483648;
+    Button = 1; Count = 1; Amount = 0; Horizontal = 0; Text = ''; Chords = '[]'; HoldMs = 0; IntervalMs = 0; Steps = 12;
+    Title = ''; Raw = 0; FrameW = 32; FrameH = 18 }
+  Emit 'READY'
+  while ($true) {
+    $line = [Console]::In.ReadLine()
+    if ($line -eq $null) { break }
+    if ($line.Trim() -eq '') { continue }
+    try {
+      $req = ConvertFrom-Json $line
+      foreach ($k in $defaults.Keys) { Set-Variable -Scope Script -Name $k -Value $defaults[$k] }
+      foreach ($prop in $req.PSObject.Properties) { Set-Variable -Scope Script -Name $prop.Name -Value $prop.Value }
+      Dispatch
+    } catch {
+      if ([string]$_.Exception.Message -ne 'TMCP_FAILED') { try { Fail 'unexpected' $_ } catch { } }
+    }
+    Emit 'END'
+  }
+  exit 0
+}
+
+try { Dispatch } catch { Fail 'unexpected' $_ }
 `;
 
 // ------------------------------------------------------------------ backends
@@ -602,7 +696,135 @@ async function windowsScript() {
   return p;
 }
 
+/** `['-Mode', 'move', '-X', '10']` as the request object the resident host reads. */
+function argsToRequest(args) {
+  const req = {};
+  for (let i = 0; i + 1 < args.length; i += 2) {
+    const key = String(args[i]).replace(/^-/, '');
+    const v = args[i + 1];
+    req[key] = ['Mode', 'Text', 'Chords', 'Title'].includes(key) ? String(v) : Number(v);
+  }
+  return req;
+}
+
+/**
+ * One PowerShell that stays up for the life of the server.
+ *
+ * Starting PowerShell and compiling the SendInput wrapper costs about 600 ms,
+ * and it used to be paid on every click. That is tolerable for a person-paced
+ * sequence and fatal for a game loop, where it capped input at under two
+ * actions a second. The resident host pays it once; each request is one JSON
+ * line in, the same output lines back, closed by END. Requests are strictly
+ * one at a time — input is inherently serial anyway, since two key sequences
+ * interleaved are a different key sequence.
+ */
+class WindowsInputHost {
+  constructor() {
+    this.proc = null;
+    this.ready = null;
+    this.chain = Promise.resolve();
+    this.onLine = null;
+    this.broken = false;
+  }
+
+  start() {
+    if (this.ready) return this.ready;
+    this.ready = (async () => {
+      const script = await windowsScript();
+      const proc = spawn(powershell(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Mode', 'serve'], {
+        stdio: ['pipe', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+      this.proc = proc;
+      let buf = '';
+      proc.stdout.setEncoding('utf8');
+      proc.stdout.on('data', (d) => {
+        buf += d;
+        let nl;
+        while ((nl = buf.indexOf('\n')) !== -1) {
+          const line = buf.slice(0, nl).replace(/\r$/, '');
+          buf = buf.slice(nl + 1);
+          this.onLine?.(line);
+        }
+      });
+      const gone = () => {
+        if (this.proc !== proc) return;
+        this.proc = null;
+        this.ready = null;
+        this.onLine?.(null);
+      };
+      proc.on('exit', gone);
+      proc.on('error', gone);
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('the input host did not start')), 20000);
+        this.onLine = (line) => {
+          if (line === 'READY') { clearTimeout(timer); resolve(); }
+          if (line === null) { clearTimeout(timer); reject(new Error('the input host exited while starting')); }
+        };
+      });
+    })();
+    this.ready.catch(() => { this.stop(); });
+    return this.ready;
+  }
+
+  run(args, timeoutMs) {
+    const job = this.chain.then(async () => {
+      await this.start();
+      const proc = this.proc;
+      return new Promise((resolve, reject) => {
+        const lines = [];
+        const timer = setTimeout(() => {
+          // Whatever it is stuck in (a held key, a hung window), a new host is
+          // cheaper than finding out.
+          this.stop();
+          reject(new Error(`Input did not finish within ${timeoutMs}ms`));
+        }, timeoutMs);
+        this.onLine = (line) => {
+          if (line === null) { clearTimeout(timer); reject(new Error('the input host exited')); return; }
+          if (line === 'END') { clearTimeout(timer); resolve(lines.join('\n')); return; }
+          lines.push(line);
+        };
+        // Non-ASCII as \u escapes: the pipe's codepage cannot corrupt what it never sees.
+        const json = JSON.stringify(argsToRequest(args)).replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+        proc.stdin.write(`${json}\n`);
+      });
+    });
+    this.chain = job.catch(() => {});
+    return job;
+  }
+
+  stop() {
+    const proc = this.proc;
+    this.proc = null;
+    this.ready = null;
+    if (proc) { try { proc.kill(); } catch { /* gone */ } }
+  }
+}
+
+let inputHost = null;
+
 async function runWindowsInput(cfg, args, timeoutMs = 20000) {
+  if (process.env.TERMINALMCP_INPUT_HOST !== '0' && !inputHost?.broken) {
+    if (!inputHost) {
+      inputHost = new WindowsInputHost();
+      process.once('exit', () => inputHost?.stop());
+    }
+    let out = null;
+    try {
+      out = await inputHost.run(args, timeoutMs);
+    } catch (err) {
+      // A host that cannot even start (a locked-down PowerShell, a policy that
+      // kills long-lived children) is not a reason to lose input: fall back
+      // to one process per action, as before, and stop trying.
+      if (/did not start|exited while starting/.test(err.message)) inputHost.broken = true;
+      else throw err;
+    }
+    if (out !== null) {
+      const reported = findWindowsError(out);
+      if (reported) throw new Error(explainWindowsFailure(reported, { what: 'Input' }));
+      return out;
+    }
+  }
   const script = await windowsScript();
   const r = await runArgv(cfg, {
     file: powershell(),
@@ -860,10 +1082,14 @@ export async function pointerPosition(cfg, { timeoutMs = 10000 } = {}) {
 }
 
 /** Move the pointer, either to a point or by an offset. */
-export async function movePointer(cfg, { x = null, y = null, dx = 0, dy = 0, timeoutMs = 10000 } = {}) {
+export async function movePointer(cfg, { x = null, y = null, dx = 0, dy = 0, raw = false, timeoutMs = 10000 } = {}) {
   const session = requireSession();
   const absolute = x !== null && y !== null;
 
+  if (raw && !absolute && session === 'windows') {
+    await runWindowsInput(cfg, ['-Mode', 'move', '-Raw', '1', '-DeltaX', String(Math.round(dx)), '-DeltaY', String(Math.round(dy))], timeoutMs);
+    return { x: null, y: null, raw: true };
+  }
   if (session === 'windows') {
     const args = absolute
       ? ['-Mode', 'move', '-X', String(Math.round(x)), '-Y', String(Math.round(y))]
@@ -1164,6 +1390,51 @@ export async function focusWindow(cfg, { window: spec, timeoutMs = 15000 } = {})
 }
 
 /** What input can and cannot do on this machine, and whether it works at all. */
+/**
+ * A tiny greyscale thumbnail of a window or the whole screen: `width x height`
+ * bytes of luma. Not for looking at — for comparing. Two frames that differ by
+ * almost nothing mean the picture did not move; a mean near zero means it went
+ * black. On Windows it rides the resident input host and costs milliseconds;
+ * elsewhere it is a real capture scaled down, which is slower but the same.
+ *
+ * Returns { width, height, luma, foreground } or { missing: 'nowindow' | 'minimized' }.
+ */
+export async function captureFrame(cfg, { window: title = null, width = 32, height = 18, timeoutMs = 15000 } = {}) {
+  const session = requireSession();
+  if (session === 'windows') {
+    const out = await runWindowsInput(cfg, ['-Mode', 'frame', '-Title', title ?? '', '-FrameW', String(width), '-FrameH', String(height)], timeoutMs);
+    const ok = parseOk(out) ?? [];
+    if (ok[0] === 'nowindow' || ok[0] === 'minimized') return { missing: ok[0] };
+    const hex = ok[2] ?? '';
+    const luma = Uint8Array.from(hex.match(/../g) ?? [], (h) => parseInt(h, 16));
+    return { width: Number(ok[0]), height: Number(ok[1]), luma, foreground: ok[3] ?? '' };
+  }
+  const { capture } = await import('./screen.js');
+  const { decodePng, resizeRgba } = await import('./image.js');
+  let shot;
+  try {
+    shot = await capture(cfg, { mode: title ? 'window' : 'screen', window: title, timeoutMs });
+  } catch (err) {
+    if (title && /no (visible )?window/i.test(err.message)) return { missing: 'nowindow' };
+    throw err;
+  }
+  const small = resizeRgba(decodePng(shot.buf), width, height);
+  const luma = new Uint8Array(width * height);
+  for (let i = 0; i < luma.length; i++) {
+    const o = i * 4;
+    luma[i] = Math.round((small.rgba[o] * 299 + small.rgba[o + 1] * 587 + small.rgba[o + 2] * 114) / 1000);
+  }
+  return { width, height, luma, foreground: '' };
+}
+
+/** Mean absolute difference of two frames, 0 (identical) to 1 (inverted). */
+export function frameDiff(a, b) {
+  if (!a || !b || a.length !== b.length || !a.length) return null;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length / 255;
+}
+
 export async function inputProbe(cfg, { timeoutMs = 20000 } = {}) {
   const session = sessionType();
   const lines = [`platform: ${process.platform}`, `session type: ${session ?? 'none'}`];

@@ -605,6 +605,13 @@ input { action: "drag", x: 100, y: 100, to_x: 400, to_y: 300 }
 
 `readOnly` blocks all of it. `position` and `probe` still answer.
 
+On Windows the input runs in one resident PowerShell that compiles its
+`SendInput` wrapper once, so an action costs a few milliseconds instead of the
+~600 ms of starting PowerShell each time. If that process cannot start, input
+falls back to one process per action (`TERMINALMCP_INPUT_HOST=0` forces this).
+`move` with `dx`/`dy` and `raw: true` sends raw mouse motion, which is what
+turns the camera in Minecraft or any FPS; those games ignore absolute moves.
+
 #### `input_bulk` — a whole sequence in one call
 
 What `shell_bulk` is to commands, `input_bulk` is to the mouse and keyboard.
@@ -695,7 +702,7 @@ including the full scrolling page.
 
 ## Optional plugins
 
-Three integrations ship with the server and **none of them are on by default**.
+Four integrations ship with the server and **none of them are on by default**.
 That is the same logic as tool profiles: a schema in the model's context costs
 tokens on every single request, and most sessions have no business talking to
 Discord.
@@ -859,6 +866,88 @@ telegram { action: "updates", wait: 60 }
 `updates` uses Telegram's own long polling, so it returns the instant a message
 arrives rather than on a timer, and the read offset is kept server-side — each
 message reaches you exactly once.
+
+### `laya` — fast decisions and an automated playtester
+
+[Laya](https://pypi.org/project/laya/) is a local "System 1" model. It answers
+typed questions about a state in one forward pass, about 30 ms on a GPU, with
+no text generated. There are three kinds: `choice` picks a label, `score` gives
+a level on a scale, and `noul` gives a calibrated probability of yes. It is the
+wrong tool for reasoning and the right one for a decision that must be made
+many times a second, where an LLM round-trip is out of the question.
+
+Setup: install Laya in a venv, then point the plugin at it.
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu124   # NVIDIA GPU; skip for CPU
+.\.venv\Scripts\python.exe -m pip install laya
+node bin/terminalmcp.js --plugin laya
+```
+
+A `.venv` in the server's working directory is found automatically; anywhere
+else, set `pluginConfig.laya.python`. The model runs in a **resident worker**
+(`plugins/laya/worker.py`) that loads the checkpoints once, so every later
+decision pays for a forward pass rather than a load. The first start downloads
+the checkpoint from Hugging Face (about 1.7 GB for the English one). Set
+`pluginConfig.laya.url` to use a running `laya-serve` instead.
+
+```
+laya { action: "decide", state: { body: "billed twice, refund please" }, questions: {
+  department: { type: "choice", instructions: "Which team?", criteria: { billing: "payments, refunds", tech: "bugs" } },
+  urgent:     { type: "noul", instructions: "Is it urgent?" } } }
+laya { action: "decide", states: [ ... ], preset: "triage" }     a batch, one call
+```
+
+**`playtest`** is the loop the model stays *out* of. On every tick it reads the
+game's state, lets Laya choose the next action, and sends the action back. It
+records every anomaly together with the ticks that led up to it. At the end the
+model reads one report instead of spending a round-trip per frame:
+
+```
+laya { action: "playtest", bridge: "127.0.0.1:8080", duration_s: 90,
+  actions: { move_forward: "walk ahead", turn_left: "turn left", jump: "jump over things", interact: "use what is in front" },
+  questions: { bug: { type: "noul", instructions: "Does this state look like a bug or a stuck player?" } },
+  anomaly: "state.has_exception || answers.bug.noul > 0.85 || state.pos[1] < -50",
+  stuck: { field: "pos", ticks: 40 }, shot_on_anomaly: true, window: "MyGame" }
+```
+
+- **State in**: a TCP `bridge` (the game listens and sends one JSON line of
+  state per tick, then reads one JSON line back), a `state_file` the game
+  rewrites, or a `state_command` run every tick. For a real game with no
+  bridge, `desktop: true` builds the state from its window (open, focused, how
+  much the picture changed, frozen for how long). Any source can add
+  `log_file`, which is followed as it grows; lines matching `error_pattern`
+  set `has_exception`.
+- **Bridges that ship**: [Unreal Engine 5](plugins/laya/bridges/unreal/terminalmcp_bridge.py)
+  (a Python script run inside the editor, with no C++ and no rebuild) and
+  [Unity](plugins/laya/bridges/unity/TerminalMcpBridge.cs) (a component). The
+  protocol, and how to drive Minecraft or any other game through its window, are in
+  [plugins/laya/bridges](plugins/laya/bridges/README.md).
+- **Action out**: to the bridge as `{"action": "<name>"}`, or whatever the
+  action's `send` says. Or as real input: give an action `input` steps in
+  `input_bulk` form (`"key w"`, `{ action: "key", keys: "w", hold_ms: 300 }`),
+  and a game with no bridge at all can still be driven. For a game that
+  captures the pointer, use `{ action: "move", dx: 300, raw: true }` to turn
+  the camera. Input is never sent while another window has the focus.
+- **What counts as an anomaly**: the `anomaly` expression, over `state`,
+  `answers`, `action`, `confidence` and `step`. Also `stuck`, a deterministic
+  check that the position has stopped changing. The same exception repeated
+  every frame is recorded once, with a count.
+- **Exploration**: `epsilon` (default 0.1) sometimes takes a random action,
+  because a deterministic policy on the same state walks into the same wall
+  forever.
+- **The report** (`.terminalmcp/playtest/<time>.json`) keeps each anomaly with
+  its state, Laya's answers, the five ticks before it and a screenshot if asked,
+  plus the action histogram and latency percentiles. `background: true` returns
+  at once; `playtest_status` and `playtest_stop` manage the run.
+
+Laya's own documentation is candid that the base checkpoints are "a fast base
+to specialise, not a zero-shot decision engine". A zero-shot playtest therefore
+explores with a bias rather than playing well. The findings come from the
+deterministic checks (exceptions, stuck, out of bounds). Laya adds breadth and a
+second opinion (`answers.bug.noul`), not proof. `readOnly` refuses `playtest`;
+`decide` is inference and still works.
 
 ### Writing your own
 
@@ -1247,6 +1336,7 @@ npm run test:image       # PNG codec, resizing, capture back-end selection   (68
 npm run test:screen      # the screen tool: real captures on a virtual X display (99)
 npm run test:input       # the input tool: real clicks and keys, witnessed by xev (123)
 npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (183)
+npm run test:laya        # laya worker, playtest, log tail, Unreal bridge     (68)
 npm run test:browser     # a real browser: 32 actions end to end, downloads  (130)
 npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
 ```

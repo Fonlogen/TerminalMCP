@@ -71,6 +71,19 @@ function tokenize(src) {
       continue;
     }
 
+    // A minus sign is part of a number only where a value is expected:
+    // `y < -10`, `f(-1)`. There is no subtraction here, so after a value it
+    // stays an unexpected character rather than being guessed at.
+    const prev = toks[toks.length - 1];
+    const expectsValue = !prev || (prev.t === 'op' && prev.v !== ')' && prev.v !== ']');
+    if (c === '-' && expectsValue && /[0-9]/.test(src[i + 1] ?? '')) {
+      let j = i + 1;
+      while (j < src.length && /[0-9.]/.test(src[j])) j++;
+      toks.push({ t: 'num', v: Number(src.slice(i, j)) });
+      i = j;
+      continue;
+    }
+
     if (/[0-9]/.test(c)) {
       let j = i;
       while (j < src.length && /[0-9.]/.test(src[j])) j++;

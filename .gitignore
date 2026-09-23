@@ -9,3 +9,6 @@ terminalmcp.config.json
 
 # Screenshots and browser downloads land here.
 .terminalmcp/
+
+# The Python venv the laya plugin finds on its own.
+.venv/

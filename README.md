@@ -235,6 +235,14 @@ input  { action: "type", text: "D:\\Games\\server" }
 input  { action: "key", keys: "enter", shot: true }
 ```
 
+Once the coordinates are known, the whole sequence is one call:
+
+```
+input_bulk { window: "Setup", delay_ms: 150, steps: [
+  "click 812 455", "type D:\\Games\\server", "key enter",
+  { action: "wait", ms: 1500 }, "shot" ] }
+```
+
 **Closing the loop with a person.** The work is only finished when somebody
 knows about it. Optional plugins put the result where they already are — and
 `wait` blocks until they answer, so asking a question costs one call rather
@@ -575,6 +583,7 @@ always to start the server from a terminal inside your own logged-in session.
 | Tool | Purpose |
 | --- | --- |
 | `input` | `move` (absolute or by an offset), `click` (any button, any count), `drag`, `scroll`, `type` (real characters, so accents and any layout work), `key` (chords and sequences, with `hold_ms` for software that needs the key held), `position`, `focus` a window by title, and `probe`. |
+| `input_bulk` | A whole sequence of those, plus screenshots and waits, in one call — with delays between steps, conditions, retries and a capped set of images. |
 
 Two things make it usable rather than merely present:
 
@@ -595,6 +604,42 @@ input { action: "drag", x: 100, y: 100, to_x: 400, to_y: 300 }
 ```
 
 `readOnly` blocks all of it. `position` and `probe` still answer.
+
+#### `input_bulk` — a whole sequence in one call
+
+What `shell_bulk` is to commands, `input_bulk` is to the mouse and keyboard.
+Steps run in order and take every `input` action, plus `shot` (a screenshot,
+any `screen` mode) and `wait`:
+
+```
+input_bulk {
+  window: "Notepad",            raised once, before step 1 — if it cannot be, nothing is sent
+  delay_ms: 150,                pause between steps (default 100): UIs need a beat
+  final_shot: "on_failure",     a picture of where it broke
+  steps: [
+    "key ctrl+n",
+    "type Hello from TerminalMCP",
+    { action: "key", keys: "ctrl+s", delay_after_ms: 800 },
+    { id: "dlg", action: "shot", mode: "window", window: "Save as" },
+    "type C:\\temp\\hello.txt", "key enter"
+  ] }
+```
+
+- **Strings are shorthand**: `"click 400 300"`, `"click"`, `"move 10 20"`,
+  `"scroll -3"`, `"type …"`, `"key ctrl+s"`, `"focus Title"`, `"wait 500"`,
+  `"shot"`, `"position"`.
+- **Delays**: `delay_ms` between steps, and per step `delay_before_ms` /
+  `delay_after_ms`, and `wait` as a step of its own.
+- **Flow**: `when`, `on_failure`, `retry` and `stop_on_failure` work as in
+  `shell_bulk`, reading `prev.ok`, `step.<id>.ok`, `vars.<name>`. A `position`
+  step exposes `step.<id>.x` / `.y`, and numeric fields accept `"${…}"`, so a
+  later step can click where the pointer was.
+- **Checked before it starts**: an unknown action, a misspelt key chord, a
+  `type` with no text or a `drag` with no destination is refused before the
+  first event is sent. So is the whole run under `readOnly`, unless it only
+  waits.
+- **Images are capped** at `max_shots` (default 4). Past the cap the oldest
+  pictures are dropped first, and the report says which ones.
 
 #### What "HID" does and does not mean here
 

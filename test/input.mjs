@@ -26,6 +26,7 @@ import {
   WINDOWS_INPUT_SCRIPT,
 } from '../src/input.js';
 import { explainWindowsFailure, sessionType } from '../src/screen.js';
+import { parseStepShorthand } from '../src/inputbulk.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = join(ROOT, 'bin', 'terminalmcp.js');
@@ -329,6 +330,62 @@ async function main() {
       }
     }
 
+    console.log('\n--- input_bulk: a sequence in one call ---');
+    {
+      check('shorthand: click with coordinates', JSON.stringify(parseStepShorthand('click 400 300')) === '{"action":"click","x":400,"y":300}');
+      check('shorthand: click where the pointer is', JSON.stringify(parseStepShorthand('click')) === '{"action":"click"}');
+      check('shorthand: type keeps the rest verbatim', parseStepShorthand('type  hello  world').text === ' hello  world');
+      check('shorthand: key, wait, scroll, focus',
+        parseStepShorthand('key ctrl+s').keys === 'ctrl+s' && parseStepShorthand('wait 250').ms === 250 &&
+        parseStepShorthand('scroll -3').amount === -3 && parseStepShorthand('focus My App').window === 'My App');
+      let err = null;
+      try { parseStepShorthand('move 10'); } catch (e) { err = e.message; }
+      check('shorthand: a half coordinate is refused', /two numbers/.test(err ?? ''), String(err));
+
+      let r = await c.call('input_bulk', { steps: ['dance'] });
+      check('an unknown step lists the real ones', r.isError && /not a step/.test(r.text) && /shot, wait/.test(r.text), r.text);
+      r = await c.call('input_bulk', { steps: ['wait 10', 'key ctrl+nope'] });
+      check('a bad chord anywhere is refused before step 1 runs', r.isError && /steps\[1\]/.test(r.text) && /not a key/.test(r.text), r.text);
+      r = await c.call('input_bulk', { steps: [{ action: 'type' }] });
+      check('type without text is refused up front', r.isError && /needs "text"/.test(r.text), r.text);
+      r = await c.call('input_bulk', { steps: [{ action: 'drag', x: 1, y: 1 }] });
+      check('a drag with no destination is refused up front', r.isError && /to_x and to_y/.test(r.text), r.text);
+      r = await c.call('input_bulk', { steps: [] });
+      check('an empty run is refused', r.isError && /non-empty/.test(r.text), r.text);
+
+      const t0 = Date.now();
+      r = await c.call('input_bulk', { steps: ['wait 50', 'wait 50', 'wait 50'], delay_ms: 100 });
+      const took = Date.now() - t0;
+      check('waits run in order', !r.isError && /3 steps: 3 ok/.test(r.text), r.text);
+      check('...with delay_ms between steps, not before the first', took >= 350 && took < 2500, `${took}ms`);
+
+      r = await c.call('input_bulk', {
+        steps: [
+          { id: 'a', action: 'wait', ms: 1 },
+          { id: 'b', action: 'wait', ms: 1, when: 'step.a.ok && vars.mode == "fast"' },
+          { id: 'c', action: 'wait', ms: 1, when: 'prev_failure' },
+        ],
+        vars: { mode: 'fast' },
+        delay_ms: 0,
+      });
+      check('when reads earlier steps and vars', !r.isError && /\[2\] b wait ok/.test(r.text), r.text);
+      check('...and skips what does not apply', /\[3\] c wait SKIPPED/.test(r.text), r.text);
+
+      r = await c.call('input_bulk', { steps: [{ action: 'wait', ms: '${vars.nothere}' }] });
+      check('a variable that is not a number is reported, not sent', r.isError && /not a number/.test(r.text), r.text);
+
+      const ro = await new Client(dir, ['--tools', 'core,input', '--read-only']).init();
+      try {
+        r = await ro.call('input_bulk', { steps: ['wait 1', 'click 10 10'] });
+        check('readOnly refuses a run that would touch anything', r.isError && /readOnly/.test(r.text) && /click/.test(r.text), r.text);
+        check('...before anything was sent', /Nothing was sent/.test(r.text), r.text);
+        r = await ro.call('input_bulk', { steps: ['wait 1'] });
+        check('...but a run that only waits still goes', !r.isError, r.text);
+      } finally {
+        ro.close();
+      }
+    }
+
     if (!session) {
       console.log('\n--- no desktop here: input must refuse clearly ---');
       for (const args of [{ action: 'move', x: 1, y: 1 }, { action: 'click' }, { action: 'type', text: 'x' }, { action: 'key', keys: 'a' }, { action: 'position' }]) {
@@ -454,6 +511,30 @@ async function main() {
           r = await c2.call('input', { action: 'click', x: 200, y: 200, shot: true, max_width: 320 });
           check('shot:true returns an image of the result', !r.isError && r.images.length === 1, r.text);
           check('...and says what it cost', /viewing:.*image tokens/.test(r.text), r.text);
+
+          witness.reset();
+          r = await c2.call('input_bulk', {
+            steps: [
+              'move 120 130',
+              { id: 'p', action: 'position' },
+              { action: 'click', x: '${step.p.x}', y: 180, button: 'right' },
+              'key a',
+              { action: 'shot', max_width: 200 },
+              { action: 'shot', max_width: 200 },
+            ],
+            delay_ms: 30,
+            max_shots: 1,
+          });
+          check('a bulk run succeeds end to end', !r.isError && /6 steps: 6 ok/.test(r.text), r.text);
+          check('...position is readable by later steps', /right click at 120,180/.test(r.text), r.text);
+          check('...only max_shots images come back', r.images.length === 1, String(r.images.length));
+          check('...and it says which one was dropped', /not attached.*\[5\]/.test(r.text), r.text);
+          ev = await witness.events();
+          check('X saw every step, in order',
+            ev.some((e) => e.type === 'MotionNotify' && e.x === 120 && e.y === 130) &&
+            ev.some((e) => e.type === 'ButtonPress' && e.button === 3 && e.x === 120 && e.y === 180) &&
+            ev.some((e) => e.type === 'KeyPress' && e.keysym === 'a'),
+            JSON.stringify(ev.map((e) => `${e.type}:${e.x},${e.y}:${e.button ?? e.keysym ?? ''}`)));
 
           check('nothing crashed the server', !/handler crash|uncaught/.test(c2.stderr), c2.stderr.slice(-300));
         } finally {

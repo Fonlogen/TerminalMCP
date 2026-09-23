@@ -21,7 +21,7 @@ const WHEN_ALIASES = {
 
 const sleep = (n) => (n > 0 ? new Promise((r) => setTimeout(r, n)) : Promise.resolve());
 
-function whenToExpr(when) {
+export function whenToExpr(when) {
   if (when === undefined || when === null || when === '') return null;
   if (typeof when === 'boolean') return when ? 'true' : 'false';
   const key = String(when).trim();

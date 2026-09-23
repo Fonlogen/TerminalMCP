@@ -1,6 +1,6 @@
 ---
 name: terminalmcp
-description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, read or write files surgically, keep values in server-side variables so they need not be re-sent, drive a real browser, and screenshot the screen or a window so you can see it. Use whenever tools like shell_exec, shell_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool, vars, browser, screen or archive are available, and especially before running several commands in a row, before reading a whole file, before reading a web page's HTML, or when orienting yourself in an unfamiliar repository.
+description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, read or write files surgically, keep values in server-side variables so they need not be re-sent, drive a real browser, and screenshot the screen or a window so you can see it. Use whenever tools like shell_exec, shell_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool, vars, browser, screen, input, input_bulk or archive are available, and especially before running several commands in a row, before reading a whole file, before reading a web page's HTML, or when orienting yourself in an unfamiliar repository.
 ---
 
 # TerminalMCP
@@ -60,6 +60,7 @@ GOOD: shell_bulk { steps: [
 | Load a web page and act on it | `browser` |
 | See what a page looks like, or what is on screen | `browser` action `screenshot`, `screen` action `shot` |
 | Click or type in an app that has no CLI | `input` actions `click`, `type`, `key` — with `shot: true` |
+| Several clicks/keys/screenshots you can plan up front | `input_bulk` |
 | Look at an image file | `screen` action `view` |
 | Which OS / shell / profile am I on | `shell_info` |
 | Tell a person the work is done | `discord` / `telegram`, if those tools are present |
@@ -548,6 +549,23 @@ Three things to get right:
 - **`type` for text, `key` for keys.** `type` sends characters, so accents and
   any keyboard layout work. `key` takes chords (`ctrl+s`, `alt+f4`) and
   sequences (`alt+f x`, in order).
+
+Once you know where things are, stop paying a round-trip per click. `input_bulk`
+runs the sequence in one call, like `shell_bulk` does for commands:
+
+```
+input_bulk { window: "Setup", delay_ms: 150, final_shot: "on_failure", steps: [
+  "click 812 455", "type D:\Games\server", "key enter",
+  { action: "wait", ms: 1500 }, "shot" ] }
+```
+
+Steps take every `input` action plus `shot` and `wait`. Strings are shorthand
+(`"click 400 300"`, `"key ctrl+s"`, `"wait 500"`, `"type …"`, `"shot"`).
+`delay_ms` is the pause between steps; `delay_before_ms` / `delay_after_ms`
+add more per step. `when` / `on_failure` / `retry` work as in `shell_bulk`.
+Images are capped at `max_shots` (default 4), newest kept. Use it for the parts
+you are sure of. Where the next click depends on what appears, end the batch
+with a `shot` and decide from that. Do not guess ahead.
 
 If nothing happens in a game, that is expected rather than broken: anti-cheat
 can refuse injected input, and no option changes it. Say so instead of retrying.

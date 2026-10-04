@@ -32,7 +32,7 @@ function group(label, mod) {
 /** Group order here is the order tools appear in tools/list. */
 export const GROUPS = {
   core: {
-    label: 'shell, jobs, bulk, file read/write/edit',
+    label: 'shell, jobs, bulk (commands or any tool), file read/write/edit',
     tools: CORE_TOOLS,
     createHandlers: createCoreHandlers,
     always: true,

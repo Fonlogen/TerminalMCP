@@ -49,6 +49,7 @@ constraint the whole design answers:
 | | Naive approach | TerminalMCP |
 | --- | --- | --- |
 | Five commands in sequence | 5 round-trips | **1** (`shell_bulk`) |
+| Read, edit, test, commit — different tools | 4+ round-trips | **1** (`tool_bulk`) |
 | Find a symbol in a repo | read the files | **`search_text`** returns matching lines only |
 | Change 3 lines of a 2,000-line file | rewrite the file | **`file_edit`** patches 3 lines |
 | Understand an unfamiliar repo | a dozen `ls` + `cat` | **1** (`project_info`) |
@@ -303,6 +304,41 @@ Shorthands: `always`, `never`, `prev_success`, `prev_failure`, `all_success`,
 `upper`, `trim`. Operators: `== != > < >= <= && || !`, plus `=~` / `!~` for
 regex and `and` / `or` as words.
 
+#### `tool_bulk` — the same, for every tool
+
+`shell_bulk` batches commands and `input_bulk` batches clicks; `tool_bulk`
+batches anything. Each step names a tool and passes it the arguments it would
+get on its own, and goes through the very same handler — same guards, same
+`readOnly`, same audit log:
+
+```
+tool_bulk { steps: [
+  { id: "rd", tool: "file_read", args: { path: "src/app.js", match: "TODO" } },
+  { tool: "file_edit", args: { path: "src/app.js", ops: [{ type: "replace_text", old: "v1", new: "v2" }] },
+    when: "contains(step.rd.output, \"TODO\")" },
+  { id: "t", tool: "shell_exec", args: { command: "npm test" }, capture: "on_failure" },
+  { tool: "git", args: { action: "commit", message: "bump to v2", all: true }, when: "step.t.ok" },
+  "shell_info"
+] }
+```
+
+- Runner fields: `id`, `when`, `delay_before_ms` / `delay_after_ms`, `retry`,
+  `on_failure`, `capture` (`full` / `on_failure` / `none`), `assign`; run-wide
+  `delay_ms`, `stop_on_failure`, `max_output_bytes`, `max_total_bytes`,
+  `max_images`.
+- A step fails when its tool throws, when a `shell_exec` exits non-zero, or
+  when its `ok_if` expression (over `output` and `exit`) is false. A policy
+  refusal always stops the run.
+- Later steps can read `prev.output`, `step.<id>.output`, `step.<id>.ok` and
+  `vars.<name>` — in `when`, and in exactly the fields that tool already
+  expands `${...}` in (the table in `src/tools/interpolate.js`).
+- `assign` keeps a step's text output in the variable store; on a
+  `shell_exec` step it keeps only the trimmed stdout.
+- Screenshots any step returns are attached, newest kept up to `max_images`
+  (default 4).
+- Checked up front: an unknown or disabled tool, a nested `tool_bulk` or a
+  broken condition is refused before the first step runs.
+
 ### 2. Server-side variables
 
 Values the agent captures can stay on the server. Store once, reference as
@@ -317,7 +353,7 @@ vars { action: "load", name: "conf", path: "config.json", json: true }
 ```
 
 Three tools write straight into the store: `shell_exec` `assign`,
-`http_request` `assign`, and per-step `assign` in `shell_bulk`.
+`http_request` `assign`, and per-step `assign` in `shell_bulk` and `tool_bulk`.
 
 `${...}` expands in commands, `cwd`, `env` values, `stdin`, file paths, URLs,
 request headers, query params, git messages and refs, and every bulk step.
@@ -417,6 +453,7 @@ verb — `git` alone would otherwise be twenty tools, and `browser` thirty.
 | `shell_exec_async` | Start a command in the background, return a `job_id`. |
 | `shell_job` | `list`, `status`, `output`, `wait`, `write`, `kill`, `remove`. |
 | `shell_bulk` | Many commands in one call, with delays, conditions, retries, variables. |
+| `tool_bulk` | Many calls to *any* tools in one call — same delays, conditions, retries, variables. |
 | `file_read` | Whole file, a line range, the tail, or only lines matching a regex. |
 | `file_write` | `overwrite`, `append`, `prepend`, `create_new`. |
 | `file_edit` | Several surgical edits in one atomic call. |

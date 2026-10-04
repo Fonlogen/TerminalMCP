@@ -577,6 +577,75 @@ async function main() {
     r = await c.call('watch', { action: 'poll', watch_id: 'watch-nope' });
     check('polling an unknown watcher is an error', r.isError, r.text.slice(0, 200));
 
+    console.log('\n--- tool_bulk: any tools, one call ---');
+    {
+      await writeFile(join(dir, 'bulk.txt'), 'alpha\nbeta\n');
+      r = await c.call('tool_bulk', {
+        steps: [
+          { id: 'rd', tool: 'file_read', args: { path: 'bulk.txt' } },
+          { id: 'ed', tool: 'file_edit', args: { path: 'bulk.txt', ops: [{ type: 'replace_text', old: 'beta', new: 'gamma' }] }, when: 'contains(step.rd.output, "beta")' },
+          { id: 'sh', tool: 'shell_exec', args: { command: 'cat bulk.txt' }, assign: 'bulk_txt' },
+          { tool: 'vars', args: { action: 'set', name: 'bulk_seen', value: '${step.sh.ok}' } },
+          { id: 'never', tool: 'shell_info', when: 'prev_failure' },
+          'shell_info',
+        ],
+      });
+      check('mixed tools run in order', !r.isError && /TOOL_BULK 6 steps: 5 ok, 0 failed, 1 skipped/.test(r.text), r.text.slice(0, 400));
+      check('a step changed the file', (await readFile(join(dir, 'bulk.txt'), 'utf8')).includes('gamma'), r.text.slice(0, 400));
+      check('when skipped what did not apply', /\[5\] never shell_info SKIPPED/.test(r.text), r.text.slice(0, 600));
+      check('shell_exec assign keeps only stdout', /vars: bulk_txt=alpha ; gamma/.test(r.text), r.text.slice(-400));
+
+      r = await c.call('vars', { action: 'get', name: 'bulk_seen' });
+      check('args are expanded against earlier steps', r.text.trim() === 'true', r.text);
+
+      r = await c.call('tool_bulk', {
+        steps: [
+          { tool: 'shell_exec', args: { command: 'exit 4' } },
+          { tool: 'shell_info' },
+        ],
+      });
+      check('a non-zero shell_exec fails the step and stops the run',
+        /1 failed/.test(r.text) && /1 not reached/.test(r.text) && /ABORTED/.test(r.text), r.text.slice(0, 300));
+
+      r = await c.call('tool_bulk', {
+        steps: [
+          { tool: 'file_read', args: { path: 'nope.txt' }, on_failure: 'continue' },
+          { tool: 'search_text', args: { pattern: 'gamma', path: '.' }, ok_if: 'contains(output, "bulk.txt")', capture: 'none' },
+        ],
+      });
+      check('on_failure:continue goes on after a throw', /1 ok, 1 failed/.test(r.text) && /error: /.test(r.text), r.text.slice(0, 400));
+      check('ok_if decides success', /\[2\] s2 search_text ok/.test(r.text), r.text.slice(0, 400));
+
+      r = await c.call('tool_bulk', { steps: [{ tool: 'search_text', args: { pattern: 'zzz-nothing', path: '.' }, ok_if: 'contains(output, "bulk.txt")' }] });
+      check('a false ok_if fails the step', /FAIL/.test(r.text) && /ok_if was false/.test(r.text), r.text.slice(0, 400));
+
+      r = await c.call('tool_bulk', { steps: [{ tool: 'tool_bulk', args: { steps: ['shell_info'] } }] });
+      check('tool_bulk cannot nest itself', r.isError && /cannot call itself/.test(r.text), r.text);
+      r = await c.call('tool_bulk', { steps: ['shell_info', { tool: 'no_such_tool' }] });
+      check('an unknown tool is refused before anything runs', r.isError && /steps\[1\]/.test(r.text) && /not enabled/.test(r.text), r.text);
+      r = await c.call('tool_bulk', { steps: [{ tool: 'shell_info', when: '((' }] });
+      check('a broken condition is refused up front', r.isError && /bad "when"/.test(r.text), r.text);
+      r = await c.call('tool_bulk', { steps: [] });
+      check('an empty run is refused', r.isError && /non-empty/.test(r.text), r.text);
+
+      const ro = new Client(dir, ['--read-only']);
+      try {
+        await ro.send('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
+        r = await ro.call('tool_bulk', {
+          steps: [
+            { tool: 'file_read', args: { path: 'bulk.txt' } },
+            { tool: 'file_write', args: { path: 'bulk.txt', content: 'x' }, on_failure: 'continue' },
+            'shell_info',
+          ],
+        });
+        check('readOnly still applies inside a run', /REFUSED/.test(r.text) && /Policy:/.test(r.text), r.text.slice(0, 400));
+        check('...and a refusal always stops it', /1 not reached/.test(r.text), r.text.slice(0, 400));
+      } finally {
+        ro.close();
+      }
+      check('the refused write left the file alone', (await readFile(join(dir, 'bulk.txt'), 'utf8')).includes('gamma'));
+    }
+
     check('nothing corrupted the protocol stream', c.stderr.includes('[terminalmcp]'), c.stderr.slice(0, 200));
   } finally {
     c.close();

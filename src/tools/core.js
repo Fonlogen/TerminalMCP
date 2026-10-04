@@ -6,6 +6,7 @@
 import process from 'node:process';
 import { runCommand } from '../exec.js';
 import { runBulk, renderBulk } from '../bulk.js';
+import { runToolBulk, renderToolBulk } from '../toolbulk.js';
 import { fileRead, fileWrite, fileEdit, fsList } from '../files.js';
 import { assertCommandAllowed } from '../guards.js';
 import { detectAvailable, resolveShell } from '../shells.js';
@@ -150,6 +151,57 @@ export const CORE_TOOLS = [
         max_output_bytes: S.maxOut,
         max_total_bytes: { type: 'integer', description: 'Total output budget for the whole run; later steps get suppressed once spent. Default 40000.' },
         vars: { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra variables for this run, layered over the persistent store. Everything already in the store is readable as vars.<name> without repeating it here.' },
+      },
+      required: ['steps'],
+    },
+  },
+
+  {
+    name: 'tool_bulk',
+    description:
+      'Call MANY tools in one call, in order — shell_bulk for every tool, not just commands. Mix file_read, ' +
+      'file_edit, search_text, git, shell_exec, http_request, browser, screen, input... Each step is ' +
+      '{tool, args} (or just a tool name when it takes no args) and supports the shell_bulk runner fields: ' +
+      'when, delay_before_ms/delay_after_ms, retry, on_failure, capture, assign (store the text output as ' +
+      'vars.<name>). A step fails if its tool errors, if a shell_exec exits non-zero, or if ok_if (an ' +
+      'expression over output/exit) is false. The fields a tool normally expands with ${vars.…} may also ' +
+      'read prev.output, step.<id>.output, step.<id>.ok here. Images from steps are attached, capped at max_images.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        steps: {
+          type: 'array',
+          minItems: 1,
+          description: 'Steps run in order. A string is a tool called with no arguments.',
+          items: {
+            type: ['object', 'string'],
+            properties: {
+              tool: { type: 'string', description: 'Name of the tool to call, e.g. "file_read". Not tool_bulk itself.' },
+              args: { type: 'object', description: 'Arguments for that tool, exactly as you would pass them directly.' },
+              id: { type: 'string', description: 'Name for this step, readable later as step.<id>. Default s1, s2, ...' },
+              when: { type: 'string', description: 'Run only if true: prev_success, prev_failure, all_success, any_failure, or an expression like \'contains(step.st.output, "modified")\'.' },
+              ok_if: { type: 'string', description: 'Success test over this step: output (its text), exit (shell_exec), e.g. \'!contains(output, "0 matches")\'.' },
+              delay_before_ms: { type: 'integer', description: 'Pause before this step.' },
+              delay_after_ms: { type: 'integer', description: 'Pause after this step.' },
+              on_failure: { type: 'string', enum: ['stop', 'continue'], description: 'stop (default): abort the remaining steps. continue: keep going.' },
+              retry: {
+                type: 'object',
+                properties: { count: { type: 'integer' }, delay_ms: { type: 'integer' } },
+                description: 'Try again while it fails.',
+              },
+              assign: { type: 'string', description: 'Store the trimmed text output in vars.<name> — for later steps and later calls.' },
+              capture: { type: 'string', enum: ['full', 'on_failure', 'none'], description: 'How much of this step output to return. Default full.' },
+              max_output_bytes: S.maxOut,
+            },
+          },
+        },
+        delay_ms: { type: 'integer', description: 'Pause between consecutive steps. Default 0.' },
+        stop_on_failure: { type: 'boolean', description: 'Abort the run at the first failing step. Default true.' },
+        capture: { type: 'string', enum: ['full', 'on_failure', 'none'], description: 'Default capture for every step. Default full.' },
+        max_output_bytes: S.maxOut,
+        max_total_bytes: { type: 'integer', description: 'Total output budget for the run; later steps are suppressed once spent. Default 40000.' },
+        max_images: { type: 'integer', description: 'Most images to attach; the newest are kept. Default 4.' },
+        vars: { type: 'object', additionalProperties: { type: 'string' }, description: 'Extra variables for this run, layered over the persistent store.' },
       },
       required: ['steps'],
     },
@@ -436,6 +488,16 @@ export function createCoreHandlers({ cfg, jobs, vars = null, server = null }) {
     async shell_bulk(a) {
       const out = await runBulk(cfg, a, { store: vars });
       return renderBulk(out);
+    },
+
+    async tool_bulk(a) {
+      if (!server) throw new Error('tool_bulk needs the server it runs in');
+      const out = await runToolBulk(cfg, a, {
+        call: (tool, args) => server.invoke(tool, args, 'tool_bulk'),
+        known: (tool) => typeof server.handlers[tool] === 'function',
+        store: vars,
+      });
+      return { text: renderToolBulk(out), images: out.images };
     },
 
     file_read: (a) => fileRead(cfg, a),

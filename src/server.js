@@ -113,7 +113,8 @@ export class Server {
             serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
             instructions:
               'Full terminal, browser and system control. Batch work through shell_bulk instead ' +
-              'of many shell_exec calls; locate code with search_text instead of reading whole ' +
+              'of many shell_exec calls, and through tool_bulk when a plan mixes tools; locate ' +
+              'code with search_text instead of reading whole ' +
               'files; patch files with file_edit; call project_info once to orient in an ' +
               'unfamiliar repo; read a web page with browser snapshot rather than its HTML. ' +
               'Some setups also expose optional integrations (fivem, discord, telegram) — use ' +
@@ -158,6 +159,25 @@ export class Server {
     } catch (err) {
       log(`internal error in ${method}: ${err.stack || err.message}`);
       return isNotification ? null : errorResponse(id, ERR.internal, err.message);
+    }
+  }
+
+  /**
+   * Run one tool on behalf of tool_bulk: the same handler a direct call
+   * reaches, audited the same way, but returning or throwing raw so the
+   * runner can decide what a failure means. Interpolation is the caller's job.
+   */
+  async invoke(name, args, via) {
+    const handler = this.handlers[name];
+    if (!handler) throw new Error(`Unknown tool "${name}"`);
+    const startedAt = Date.now();
+    try {
+      const out = await handler(args);
+      this.audit({ tool: name, via, ok: true, ms: Date.now() - startedAt, args: redact(args) });
+      return out;
+    } catch (err) {
+      this.audit({ tool: name, via, ok: false, ms: Date.now() - startedAt, error: err.message, args: redact(args) });
+      throw err;
     }
   }
 

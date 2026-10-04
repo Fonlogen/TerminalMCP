@@ -22,7 +22,8 @@ export const INTERPOLATE_FIELDS = {
   shell_exec: ['command', 'cwd', 'stdin', 'env.*'],
   shell_exec_async: ['command', 'cwd', 'env.*'],
   // shell_bulk is missing on purpose: it interpolates per step, as it runs, so
-  // that a step can use what the step before it produced.
+  // that a step can use what the step before it produced. tool_bulk likewise:
+  // it expands each step's args with THIS table, against the run's context.
   file_read: ['path'],
   file_write: ['path'],
   file_edit: ['path'],

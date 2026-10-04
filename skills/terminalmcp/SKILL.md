@@ -1,6 +1,6 @@
 ---
 name: terminalmcp
-description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, read or write files surgically, keep values in server-side variables so they need not be re-sent, drive a real browser, and screenshot the screen or a window so you can see it. Use whenever tools like shell_exec, shell_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool, vars, browser, screen, input, input_bulk or archive are available, and especially before running several commands in a row, before reading a whole file, before reading a web page's HTML, or when orienting yourself in an unfamiliar repository.
+description: Drive a machine through the TerminalMCP server — run shell commands, background long jobs, batch whole command pipelines in one call, grep and patch code, drive git and package managers, inspect processes and the network, read or write files surgically, keep values in server-side variables so they need not be re-sent, drive a real browser, and screenshot the screen or a window so you can see it. Use whenever tools like shell_exec, shell_bulk, tool_bulk, search_text, git, file_edit, project_info, fs_op, sys_info, proc, http_request, json_tool, vars, browser, screen, input, input_bulk or archive are available, and especially before running several commands in a row, before reading a whole file, before reading a web page's HTML, or when orienting yourself in an unfamiliar repository.
 ---
 
 # TerminalMCP
@@ -36,6 +36,7 @@ GOOD: shell_bulk { steps: [
 | --- | --- |
 | One quick command, need the output now | `shell_exec` |
 | Several commands you can plan up front | `shell_bulk` |
+| Several calls to *different* tools you can plan up front (read, edit, test, git…) | `tool_bulk` |
 | Build, install, dev server, watcher, long test run | `shell_exec_async` + `shell_job` |
 | Find where something is in the code | `search_text` |
 | Find files by name, size or age | `search_files` |
@@ -135,6 +136,42 @@ Write `$${...}` when you want a literal `${...}` to reach the shell.
 
 `capture: "on_failure"` is the big token win on pipelines like this: silence
 while everything passes, full output exactly where it broke.
+
+## tool_bulk — batch any tools, not just commands
+
+`shell_bulk` only runs commands. When the plan mixes tools — read a file,
+patch it, run the tests, check git — `tool_bulk` runs the whole thing in one
+call. Each step is `{tool, args}`, with `args` exactly what you would pass the
+tool directly; a bare string is a tool called with no arguments.
+
+```
+tool_bulk { steps: [
+  { id: "rd", tool: "file_read", args: { path: "src/app.js", match: "TODO" } },
+  { tool: "file_edit", args: { path: "src/app.js",
+      ops: [{ type: "replace_text", old: "v1", new: "v2" }] },
+    when: "contains(step.rd.output, \"TODO\")" },
+  { id: "t", tool: "shell_exec", args: { command: "npm test" }, capture: "on_failure" },
+  { tool: "git", args: { action: "status" } },
+  "shell_info"
+] }
+```
+
+- Runner fields as in `shell_bulk`: `id`, `when`, `delay_before_ms` /
+  `delay_after_ms`, `retry`, `on_failure`, `capture` (`full`, `on_failure`,
+  `none`), `assign`; run-wide `delay_ms`, `stop_on_failure`,
+  `max_total_bytes`, `max_images`.
+- **A step fails** when its tool errors, when a `shell_exec` exits non-zero,
+  or when `ok_if` — an expression over `output` and `exit` — is false.
+  A `Policy:` refusal always stops the run.
+- Later steps read `prev.output`, `step.<id>.output`, `step.<id>.ok`,
+  `vars.<name>` — in `when`, and in the fields that tool would normally expand
+  `${...}` in (paths, commands, URLs…; never file content).
+- `assign` stores the step's text output; on a `shell_exec` it stores just the
+  trimmed stdout. A `vars` step in the run is visible to the steps after it.
+- Images (screenshots from `screen`, `browser`, `input`) are attached, newest
+  kept up to `max_images`.
+- It cannot call itself; an unknown or disabled tool is refused before
+  anything runs.
 
 ## Starting work in an unfamiliar repository
 
@@ -679,7 +716,7 @@ that is a deliberate operator setting: report it, do not try to work around it.
 
 ## Token discipline, in short
 
-1. `shell_bulk` over repeated `shell_exec`.
+1. `shell_bulk` over repeated `shell_exec`; `tool_bulk` over a string of different tool calls.
 2. `project_info` once, instead of exploring a repo by hand.
 3. `search_text` to locate code; never read a file to find a symbol.
 4. `code outline` before reading a file you do not know.

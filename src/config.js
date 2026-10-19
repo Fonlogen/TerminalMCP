@@ -127,6 +127,10 @@ export const DEFAULTS = {
     cors: true,
     strictSessions: false,
     sseReplies: false,
+    // A Cloudflare quick tunnel, for reaching the server from outside the
+    // network it is on. Off by default: it makes the server public.
+    tunnel: false,
+    cloudflaredPath: null,
   },
 };
 

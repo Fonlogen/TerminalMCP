@@ -937,7 +937,56 @@ PORT=9000 ./start-http.sh
 
 ./start.sh --http                # local only (127.0.0.1:8787)
 node bin/terminalmcp.js --http --host 0.0.0.0 --port 8787
+
+./start-http-tunnel.sh           # + a public URL through Cloudflare, all tools
+start-http-tunnel.cmd            # same, on Windows
 ```
+
+#### A public URL, without touching the router
+
+`--tunnel` starts the server and asks Cloudflare for a throwaway hostname under
+`trycloudflare.com`, connecting to it outbound. No account, no DNS, no port
+forwarding — which is the whole appeal when the machine is behind NAT or a
+firewall somebody else administers.
+
+```bash
+node bin/terminalmcp.js --http --tunnel --tools all
+```
+
+```
+  ============================================================
+   PUBLIC URL   https://brave-lemon-rally-pine.trycloudflare.com/mcp
+   legacy SSE   https://brave-lemon-rally-pine.trycloudflare.com/sse
+   health       https://brave-lemon-rally-pine.trycloudflare.com/health
+  ------------------------------------------------------------
+   claude mcp add --transport http terminal https://brave-...com/mcp
+  ------------------------------------------------------------
+   ANYONE WITH THIS URL HAS A SHELL ON THIS MACHINE.
+  ============================================================
+```
+
+It needs `cloudflared` on PATH — `winget install --id Cloudflare.cloudflared`,
+`brew install cloudflared`, or the binary from
+[its releases](https://github.com/cloudflare/cloudflared/releases/latest).
+`--doctor` says whether it was found, and `--cloudflared <path>` points at a
+specific one.
+
+Three things worth knowing before using it:
+
+- **The URL is public and there is no authentication.** It is random, but random
+  is not secret: it travels wherever you paste it, and one paste into the wrong
+  window is enough. A quick tunnel is for a session, not for leaving up.
+- **The hostname changes every run.** Quick tunnels are ephemeral by design; a
+  stable hostname needs a named tunnel and a Cloudflare account, which is a
+  different feature and not this one.
+- **`--tunnel` binds `127.0.0.1`** unless `--host` says otherwise. cloudflared
+  reaches the server locally, so the port does not need to be open on the local
+  network as well — one fewer way in, for free.
+
+A tunnel that cannot be opened is reported and otherwise ignored: the server
+keeps serving locally rather than failing to start. `start-http-tunnel` enables
+every tool group, which is a lot of schema — if a tool goes missing in your
+client, that is the truncation described above, and `--tools web` is the fix.
 
 Both MCP HTTP transports are served at once, so current and older clients work
 against the same port:
@@ -1113,6 +1162,10 @@ measures that change a lot:
   SSH tunnel is enough: `ssh -L 8787:127.0.0.1:8787 user@host`, then point the
   client at `http://127.0.0.1:8787/mcp` while the server stays bound to
   localhost.
+- `--tunnel` is the deliberate exception: it puts the server on the public
+  internet behind a random hostname, which is convenience bought with exposure.
+  Use it for a session you are watching, not as a deployment, and stop the
+  server when you are done — the URL dies with it.
 - On an untrusted network, put a reverse proxy (Caddy, nginx) in front with TLS
   and Basic Auth. The server neither knows nor cares.
 
@@ -1210,6 +1263,7 @@ src/browser.js            page operations: snapshot, input, capture, network
 src/image.js              PNG decode / resize / encode, and image token maths
 src/screen.js             desktop capture per platform, display and window lists
 src/input.js              mouse and keyboard per platform, key tables, chords
+src/tunnel.js             Cloudflare quick tunnels: find cloudflared, parse its URL
 src/shells.js             shell detection and per-platform invocation
 src/config.js             configuration loading and precedence
 src/guards.js             optional guardrails
@@ -1275,17 +1329,17 @@ quietly disappear:
 ## Testing
 
 ```bash
-npm test                 # 990 assertions
+npm test                 # 1052 assertions
 npm run test:smoke       # stdio protocol, exec, jobs, bulk, files, profiles (101)
 npm run test:guards      # guardrails: readOnly, allowedRoots, deny*         (14)
-npm run test:tools       # extended tools: search, git, fs, archive, …      (156)
+npm run test:tools       # extended tools: search, git, fs, archive, bulk   (172)
 npm run test:vars        # variables, interpolation, secrets, persistence    (67)
 npm run test:image       # PNG codec, resizing, capture back-end selection   (68)
 npm run test:screen      # the screen tool: real captures on a virtual X display (99)
-npm run test:input       # the input tool: real clicks and keys, witnessed by xev (123)
+npm run test:input       # the input tool: real clicks and keys, witnessed by xev (146)
 npm run test:plugins     # loader + fivem, discord, telegram vs mocks       (183)
 npm run test:browser     # a real browser: 32 actions end to end, downloads  (130)
-npm run test:http        # HTTP transport: streamable + legacy SSE           (49)
+npm run test:http        # HTTP transport: streamable, legacy SSE, tunnel     (72)
 ```
 
 The tests spawn the **real server** and speak MCP to it — over stdio for the

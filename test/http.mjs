@@ -5,7 +5,16 @@ import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import process from 'node:process';
+import {
+  cloudflaredCandidates,
+  findCloudflared,
+  installHint,
+  parseTunnelUrl,
+  tunnelFailureDetail,
+} from '../src/tunnel.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = join(ROOT, 'bin', 'terminalmcp.js');
@@ -352,6 +361,98 @@ async function main() {
     check('nothing was written to stdout', true);
     check('the server logged the HTTP endpoints', srv.stderr.includes('streamable http:'), srv.stderr.slice(0, 300));
     check('binding to localhost prints no exposure warning', !srv.stderr.includes('NO authentication'), srv.stderr.slice(0, 300));
+
+    console.log('\n--- the Cloudflare quick tunnel ---');
+    {
+      // The URL arrives inside an ASCII box on cloudflared's log stream, not
+      // as a value on stdout, so finding it is a search through noise.
+      const banner = [
+        '2026-10-19T10:00:00Z INF Thank you for trying Cloudflare Tunnel.',
+        '2026-10-19T10:00:00Z INF +------------------------------------------------------+',
+        '2026-10-19T10:00:00Z INF |  Your quick Tunnel has been created! Visit it at:    |',
+        '2026-10-19T10:00:00Z INF |  https://brave-lemon-rally-pine.trycloudflare.com    |',
+        '2026-10-19T10:00:00Z INF +------------------------------------------------------+',
+      ].join('\n');
+      check('the tunnel URL is found in the banner', parseTunnelUrl(banner) === 'https://brave-lemon-rally-pine.trycloudflare.com', String(parseTunnelUrl(banner)));
+      check('a partial banner yields nothing rather than a guess', parseTunnelUrl('INF Requesting new quick Tunnel...') === null);
+      check('an unrelated https URL is not mistaken for it', parseTunnelUrl('see https://developers.cloudflare.com/docs') === null);
+      check('nothing in, nothing out', parseTunnelUrl('') === null && parseTunnelUrl(undefined) === null);
+
+      const failed = [
+        '2026-10-19T10:00:00Z INF Requesting new quick Tunnel on trycloudflare.com...',
+        '2026-10-19T10:00:01Z ERR Unable to reach the Cloudflare API: dial tcp: lookup api.trycloudflare.com: no such host',
+      ].join('\n');
+      check('a failure is summarised by its own error line', /Unable to reach the Cloudflare API/.test(tunnelFailureDetail(failed)), tunnelFailureDetail(failed));
+      check('...with the log level stripped', !/ERR/.test(tunnelFailureDetail(failed)), tunnelFailureDetail(failed));
+      check('a silent cloudflared still produces something to read', tunnelFailureDetail('2026-10-19T10:00:00Z INF Requesting...').length > 0);
+
+      check('an explicit binary that is missing is refused, not searched around',
+        (() => { try { findCloudflared({ explicit: '/no/such/cloudflared' }); return false; } catch (e) { return /No cloudflared at/.test(e.message); } })());
+      const fakeDir = await mkdtemp(join(tmpdir(), 'tmcp-cf-'));
+      const onPath = join(fakeDir, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+      await writeFile(onPath, '');
+      check('cloudflared is found on PATH', findCloudflared({ env: { PATH: fakeDir } }) === onPath, String(findCloudflared({ env: { PATH: fakeDir } })));
+      check('...and absent when it is not there', findCloudflared({ env: { PATH: join(fakeDir, 'empty') } }) === null);
+      check('the install hint is per platform',
+        /winget/.test(installHint('win32')) && /brew/.test(installHint('darwin')) && /releases/.test(installHint('linux')));
+      check('windows looks where winget and choco put it',
+        cloudflaredCandidates({ ProgramFiles: 'C:\\Program Files' }, 'win32').some((c) => /cloudflared\.exe$/.test(c)));
+      check('macOS looks in both homebrew prefixes',
+        cloudflaredCandidates({}, 'darwin').includes('/opt/homebrew/bin/cloudflared'));
+      await rm(fakeDir, { recursive: true, force: true });
+    }
+
+    if (process.platform !== 'win32') {
+      console.log('\n--- a tunnel, end to end, against a stand-in for cloudflared ---');
+      const dir = await mkdtemp(join(tmpdir(), 'tmcp-tunnel-'));
+      const stub = join(dir, 'cloudflared');
+      const argsFile = join(dir, 'args.txt');
+      // Same arguments, same banner, same refusal to exit as the real thing.
+      await writeFile(stub, [
+        '#!/usr/bin/env sh',
+        'echo "INF Requesting new quick Tunnel on trycloudflare.com..." >&2',
+        `echo "$*" > ${JSON.stringify(argsFile)}`,
+        'echo "INF |  https://brave-lemon-rally-pine.trycloudflare.com  |" >&2',
+        'while true; do sleep 5; done',
+      ].join('\n'));
+      await chmod(stub, 0o755);
+
+      const dead = join(dir, 'cloudflared-dead');
+      await writeFile(dead, ['#!/usr/bin/env sh', 'echo "ERR Unable to reach the Cloudflare API" >&2', 'exit 1'].join('\n'));
+      await chmod(dead, 0o755);
+
+      const tunnelPort = PORT + 7;
+      const tun = startServer(['--tunnel', '--cloudflared', stub, '--tools', 'core'], tunnelPort);
+      try {
+        for (let i = 0; i < 40 && !tun.stderr.includes('PUBLIC URL'); i++) await sleep(250);
+        check('the public URL is printed', tun.stderr.includes('https://brave-lemon-rally-pine.trycloudflare.com/mcp'), tun.stderr.slice(-400));
+        check('...with the one-liner that registers it', /claude mcp add --transport http terminal https:\/\//.test(tun.stderr), tun.stderr.slice(-400));
+        check('...and the legacy SSE endpoint', /trycloudflare\.com\/sse/.test(tun.stderr));
+        check('the warning is impossible to miss', /ANYONE WITH THIS URL HAS A SHELL ON THIS MACHINE/.test(tun.stderr), tun.stderr.slice(-400));
+        const asked = await readFile(argsFile, 'utf8').catch(() => '');
+        check('cloudflared was told to tunnel the local port', asked.includes(`--url http://127.0.0.1:${tunnelPort}`), asked.trim());
+        check('...and told not to update itself mid-session', asked.includes('--no-autoupdate'), asked.trim());
+
+        const health = await req('GET', '/health', { port: tunnelPort });
+        check('the server itself serves normally', health.status === 200 && health.json?.status === 'ok', health.text.slice(0, 120));
+      } finally {
+        tun.proc.kill('SIGTERM');
+        await sleep(600);
+      }
+
+      const broken = startServer(['--tunnel', '--cloudflared', dead, '--tools', 'core'], PORT + 8);
+      try {
+        for (let i = 0; i < 40 && !broken.stderr.includes('could not be opened'); i++) await sleep(250);
+        check('a tunnel that fails says why, in cloudflared\u2019s own words', /Unable to reach the Cloudflare API/.test(broken.stderr), broken.stderr.slice(-300));
+        check('...and does not take the server down with it', /still listening on http:\/\/127\.0\.0\.1/.test(broken.stderr), broken.stderr.slice(-300));
+        const health = await req('GET', '/health', { port: PORT + 8 });
+        check('...which is true, not just claimed', health.status === 200, String(health.status));
+      } finally {
+        broken.proc.kill('SIGTERM');
+        await sleep(300);
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
   } finally {
     srv.proc.kill();
     strict.proc.kill();

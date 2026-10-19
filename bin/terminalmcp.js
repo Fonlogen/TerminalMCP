@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import { loadConfig } from '../src/config.js';
 import { Server, serveStdio, SERVER_NAME, SERVER_VERSION, log } from '../src/server.js';
 import { serveHttp } from '../src/http.js';
+import { findCloudflared, installHint, startQuickTunnel } from '../src/tunnel.js';
 import { detectAvailable, resolveShell } from '../src/shells.js';
 import { buildToolset, describeGroups, GROUP_NAMES, ALIASES } from '../src/tools/index.js';
 import { findBrowser } from '../src/cdp.js';
@@ -61,6 +62,13 @@ HTTP transport (no authentication — see README):
   --sse-replies          answer POSTs with an SSE stream even when JSON would do
                          (only needed behind a proxy that cuts idle responses)
   --max-body-bytes <n>   request body cap (default 33554432)
+  --tunnel               also open a Cloudflare quick tunnel and print its public
+                         https://<random>.trycloudflare.com URL. Needs cloudflared.
+                         Implies --http, and binds 127.0.0.1 unless --host says
+                         otherwise: the tunnel reaches the server, so the port
+                         does not need to be open on the network as well.
+                         THE URL IS PUBLIC AND THERE IS NO AUTHENTICATION.
+  --cloudflared <path>   use this cloudflared binary instead of looking for one
 
 Options:
   --cwd <dir>            default working directory for commands
@@ -151,6 +159,13 @@ function overridesFrom(args) {
   if (args.strict_sessions) http.strictSessions = true;
   if (args.sse_replies) http.sseReplies = true;
   if (args.max_body_bytes !== undefined) http.maxBodyBytes = Number(args.max_body_bytes);
+  if (args.tunnel) {
+    http.enabled = true;
+    http.tunnel = true;
+    // Binding the loopback is enough with a tunnel, and it is one fewer way in.
+    if (typeof args.host !== 'string') http.host = '127.0.0.1';
+  }
+  if (typeof args.cloudflared === 'string') http.cloudflaredPath = args.cloudflared;
   if (Object.keys(http).length) o.http = http;
 
   return o;
@@ -332,6 +347,7 @@ function doctor(cfg, plugins = { groups: {}, loaded: [], errors: [] }) {
         ? `http on ${cfg.http.host}:${cfg.http.port}${cfg.http.path} (no auth)`
         : 'stdio'
     }`,
+    `tunnel      ${describeTunnel(cfg)}`,
   ];
   process.stdout.write(`${out.join('\n')}\n`);
   const major = Number(process.versions.node.split('.')[0]);
@@ -339,6 +355,19 @@ function doctor(cfg, plugins = { groups: {}, loaded: [], errors: [] }) {
     process.stdout.write(`\nWARNING: node ${process.version} is too old; TerminalMCP needs >= 18.\n`);
     process.exitCode = 1;
   }
+}
+
+/** Whether a quick tunnel is wanted, and whether it could be opened. */
+function describeTunnel(cfg) {
+  const found = findCloudflared({ explicit: cfg.http.cloudflaredPath });
+  if (!cfg.http.tunnel) {
+    return found
+      ? `off (--tunnel would use ${found})`
+      : 'off (cloudflared not installed, so --tunnel would fail)';
+  }
+  return found
+    ? `on -> ${found}, public URL printed at startup (NO AUTH)`
+    : `on, but cloudflared is not installed:\n            ${installHint().replace(/\n/g, '\n            ')}`;
 }
 
 async function main() {
@@ -394,6 +423,79 @@ async function main() {
 
   if (cfg.http.enabled) serveHttp(server, cfg.http);
   else serveStdio(server);
+
+  if (cfg.http.enabled && cfg.http.tunnel) await openTunnel(cfg);
+}
+
+/**
+ * Open the quick tunnel and say, loudly, what has just become reachable.
+ *
+ * The server is already serving by this point: a tunnel that cannot be opened
+ * is a reason to say so, not a reason to take the server down with it.
+ */
+async function openTunnel(cfg) {
+  const { host, port, path, ssePath } = cfg.http;
+  log('opening a Cloudflare quick tunnel...');
+
+  let tunnel;
+  try {
+    tunnel = await startQuickTunnel({
+      port,
+      host,
+      bin: cfg.http.cloudflaredPath,
+      // cloudflared's own log is noisy and goes nowhere by default; keep the
+      // lines that matter so a failure after startup is not invisible.
+      onLog: (text) => {
+        for (const line of text.split(/\r?\n/)) {
+          if (/ERR|failed|unable|retrying/i.test(line) && line.trim()) {
+            log(`cloudflared: ${line.replace(/^\S+\s+(INF|WRN|ERR)\s+/, '').trim()}`);
+          }
+        }
+      },
+    });
+  } catch (err) {
+    process.stderr.write(
+      `\n[terminalmcp] the tunnel could not be opened: ${err.message}\n` +
+      `[terminalmcp] the server is still listening on http://${host}:${port}${path}\n\n`,
+    );
+    return;
+  }
+
+  const stop = () => tunnel.stop();
+  process.on('exit', stop);
+  // The HTTP transport installs its own signal handlers and shuts down
+  // gracefully, and it registered them first, so it runs first. These exist so
+  // that a tunnel can never be the reason a signal is ignored: the timer is a
+  // fallback, unref'd so it cannot hold the process open when the graceful
+  // path gets there on its own.
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      stop();
+      setTimeout(() => process.exit(0), 2500).unref();
+    });
+  }
+  // A tunnel to a server that has stopped serving is worse than no tunnel.
+  tunnel.proc.on('exit', () => log('cloudflared exited; the public URL is dead'));
+
+  process.stderr.write(
+    [
+      '',
+      '  ============================================================',
+      `   PUBLIC URL   ${tunnel.url}${path}`,
+      `   legacy SSE   ${tunnel.url}${ssePath}`,
+      `   health       ${tunnel.url}/health`,
+      '  ------------------------------------------------------------',
+      '   claude mcp add --transport http terminal ' + `${tunnel.url}${path}`,
+      '  ------------------------------------------------------------',
+      '   ANYONE WITH THIS URL HAS A SHELL ON THIS MACHINE.',
+      '   There is no authentication. The hostname is random, but random',
+      '   is not secret: it travels wherever you paste it. Close this',
+      '   window when you are done — the URL dies with it, and the next',
+      '   run gets a different one.',
+      '  ============================================================',
+      '',
+    ].join('\n'),
+  );
 }
 
 main().catch((err) => {
